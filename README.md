@@ -136,22 +136,6 @@ rustc 1.84 working — newer versions of those crates require
 | Real program ID | Currently a placeholder. Needs `solana-keygen grind` before deployment. |
 | Conservation tests | Framework is in place (`tests/test_conservation.rs`); INV-1 is active, INV-2 through INV-6 are gated on `EnrollMarketAndInit`. |
 
-## Potential upstream improvements (optional)
-
-Two additions to `percolator-prog` would simplify the wrapper but aren't
-required:
-
-- A CPI-callable view of `is_above_maintenance_margin` would let the
-  wrapper enforce portfolio-level health on Withdraw/Trade without
-  duplicating engine math locally.
-- A way to change `engine.account.owner` after init would let existing
-  isolated-margin users migrate to portfolio mode without flattening
-  positions first.
-
-Without either, the wrapper still works — the first is replaced by
-local margin computation, the second by requiring fresh accounts at
-enroll time.
-
 ## License
 
 Apache-2.0. See [`LICENSE`](./LICENSE).
