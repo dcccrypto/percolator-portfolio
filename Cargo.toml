@@ -1,0 +1,46 @@
+[package]
+name = "percolator-portfolio"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_arch, values("sbf", "bpf"))', 'cfg(kani)', 'cfg(target_os, values("solana"))', 'cfg(feature, values("custom-heap", "custom-panic"))'] }
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "percolator_portfolio"
+path = "src/portfolio.rs"
+
+[features]
+no-entrypoint = []
+test = []
+test-sbf = ["test"]
+kani = []
+mainnet = []
+
+[dependencies]
+solana-program = "1.18"
+# spl-token kept on the manifest because Deposit/Withdraw CPIs (next
+# milestone) will use it. Dead-but-imminent.
+spl-token = { version = "4.0", features = ["no-entrypoint"] }
+bytemuck = { version = "1.14", features = ["derive", "min_const_generics"] }
+# Pins for the SBF toolchain (rustc 1.84, no edition2024). Each of these
+# crates' next-major releases require edition2024, so pin to the last
+# 1.84-compatible version. Same workaround percolator-prog ships with.
+blake3 = "=1.8.1"
+indexmap = "=2.7.1"
+hashbrown = "=0.15.2"
+once_cell = "=1.20.2"
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+opt-level = "z"
+
+[dev-dependencies]
+bincode = "1"
+solana-sdk = "1.18"
+solana-program-runtime = "1.18"
+litesvm = "0.1"
