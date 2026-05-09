@@ -3,6 +3,9 @@ name = "percolator-portfolio"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "Apache-2.0"
+description = "USDC cross-margin wrapper over percolator-prog isolated markets"
+repository = "https://github.com/dcccrypto/percolator-portfolio"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_arch, values("sbf", "bpf"))', 'cfg(kani)', 'cfg(target_os, values("solana"))', 'cfg(feature, values("custom-heap", "custom-panic"))'] }
