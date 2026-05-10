@@ -2655,7 +2655,7 @@ pub mod proofs {
     #[kani::unwind(70)]
     fn decode_unknown_tag_rejected() {
         let tag: u8 = kani::any();
-        kani::assume(tag >= 12); // tags 0..=11 are now valid
+        kani::assume(tag >= 13); // tags 0..=12 are now valid (12 = EnrollMarketAndInit)
         let len: usize = kani::any();
         kani::assume(len >= 1 && len <= 64);
         let mut buf = [0u8; 64];
