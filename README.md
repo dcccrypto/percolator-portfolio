@@ -54,26 +54,29 @@ what `portfolio_vault` is — a per-user SPL Token account whose owner
 is the PDA. Each Deposit becomes two transfers (user_ata → vault →
 market_vault) at the cost of a small CU overhead.
 
-## Instructions (12 total)
+## Instructions (13 total)
 
 | Tag | Instruction | Signer | Implemented |
 |---|---|---|---|
-| 0  | `InitPortfolio`     | user   | yes |
-| 1  | `EnrollMarket`      | user   | state-only (no InitUser CPI yet) |
-| 2  | `UnenrollMarket`    | user   | yes |
-| 3  | `Deposit`           | user   | yes |
-| 4  | `Withdraw`          | user   | yes |
-| 5  | `Trade`             | user   | yes (CPI to `percolator-prog::TradeCpi`) |
-| 6  | `Rebalance`         | keeper | yes (max 4 legs) |
-| 7  | `EmergencyClose`    | user   | yes |
-| 8  | `UpdateConfig`      | user   | yes |
-| 9  | `SetPaused`         | user   | yes |
-| 10 | `InitVault`         | user   | yes |
-| 11 | `ClosePortfolio`    | user   | yes |
+| 0  | `InitPortfolio`        | user   | yes |
+| 1  | `EnrollMarket`         | user   | state-only (advanced flow — register a separately-init'd account) |
+| 2  | `UnenrollMarket`       | user   | yes |
+| 3  | `Deposit`              | user   | yes |
+| 4  | `Withdraw`             | user   | yes |
+| 5  | `Trade`                | user   | yes (CPI to `percolator-prog::TradeCpi`) |
+| 6  | `Rebalance`            | keeper | yes (max 4 legs) |
+| 7  | `EmergencyClose`       | user   | yes |
+| 8  | `UpdateConfig`         | user   | yes |
+| 9  | `SetPaused`            | user   | yes |
+| 10 | `InitVault`            | user   | yes |
+| 11 | `ClosePortfolio`       | user   | yes |
+| 12 | `EnrollMarketAndInit`  | user   | yes (atomic — transfers fee, CPIs `InitUser`, registers slot) |
 
-Setup flow for a new user: `InitPortfolio` → `InitVault` → `EnrollMarket × N`
-→ `Deposit`. The keeper rebalances collateral between enrolled markets
-when a per-market account approaches its local maintenance margin.
+Recommended setup flow: `InitPortfolio` → `InitVault` → `EnrollMarketAndInit × N`
+(transfers `fee_payment` from user_ata, signs `InitUser` as `portfolio_auth`,
+records the slot). Then `Deposit` to fund trading capital. The keeper
+rebalances collateral between enrolled markets when a per-market account
+approaches its local maintenance margin.
 
 ## Verification
 
@@ -181,13 +184,75 @@ These constraints are why the wrapper:
   keeper rebalance" in v1, with a documented path to "hard cross-margin
   with fresh-oracle aggregate IM" once the margin math is ported.
 
+## Squads-style custody (recipe)
+
+The wrapper-PDA-as-stable-owner architecture means key rotation is the
+custody program's job, not the engine's or the wrapper's. To get a
+multisig-controlled portfolio that rotates signers without ever
+touching the engine, point `InitPortfolio` at a Squads multisig PDA
+instead of a user wallet. The wrapper records that PDA as the portfolio
+owner; from then on, every owner-gated wrapper instruction must be
+proposed → approved → executed through Squads.
+
+### One-time setup
+
+1. **Create the Squads V4 multisig** off-chain. Note the resulting
+   multisig PDA address — call it `MS`.
+2. **Construct an `InitPortfolio` instruction** using `MS` as the user
+   (signer). The portfolio PDAs derive from `MS`:
+   - `portfolio_data` = `["portfolio", MS]`
+   - `portfolio_auth` = `["portfolio_auth", MS]`
+   - `portfolio_vault` = `["portfolio_vault", MS]`
+3. **Submit through Squads** as a proposal. Once members approve and
+   execute, Squads dispatches the `InitPortfolio` CPI with `MS` as the
+   signing PDA. The wrapper sees `MS` as the user and stores it as the
+   portfolio owner.
+4. **`InitVault`** the same way — propose, approve, execute through
+   Squads.
+
+After step 4 the portfolio is live. The wrapper sees `MS` as the owner
+forever; the engine sees `portfolio_auth` (derived from `MS`) as the
+account owner of every enrolled market slot.
+
+### Rotating signers
+
+Rotation happens entirely inside Squads — add/remove members, change
+threshold — using Squads' own multisig admin instructions. Neither the
+wrapper nor the engine is involved. The multisig PDA `MS` stays the
+same, so:
+- `portfolio_data`, `portfolio_auth`, `portfolio_vault` PDAs unchanged
+- engine-side `account.owner = portfolio_auth` unchanged
+- no on-chain wrapper or engine state needs migration
+
+This is exactly the property the upstream maintainer pointed to in
+`aeyakovenko/percolator-prog#88`: "an external custody program can
+initialize the account with its PDA as the owner and then rotate
+keys/signers internally." The recipe above is that pattern.
+
+### Caveats
+
+- **Squads multisig must remain solvent for rent.** If `MS` runs out
+  of lamports and gets cleaned up by the runtime, the portfolio is
+  permanently bricked (no path to re-derive a new owner without
+  engine `transfer_owner`, which doesn't exist by design).
+- **Threshold-of-one is single-key custody.** A 1-of-1 Squads is
+  functionally equivalent to a wallet-owned portfolio — no real
+  custody benefit. Use ≥ 2-of-N for actual multisig.
+- **Programmatic rebalance is fine.** The keeper field on the
+  portfolio is independent of the owner. A 2-of-3 Squads can keep a
+  hot keeper key for autonomous `Rebalance` while owner-gated ops
+  (Withdraw, EmergencyClose, UpdateConfig) still require multisig
+  approval.
+- **Squads V4 only.** The recipe above assumes V4's PDA-as-signer
+  model. V3 does not expose its multisig PDA the same way.
+
 ## Status / what's not yet done
 
 | | |
 |---|---|
-| `EnrollMarketAndInit` | The current `EnrollMarket` is state-only. Wiring `percolator-prog::InitUser` from inside it (so the per-market account is created with `owner = portfolio_auth` automatically) is the next item. Once it's in, the integration harness can exercise full Deposit/Withdraw/Rebalance/EmergencyClose round-trips. |
-| **Pre-trade aggregate margin check** | Trade currently relies on the engine's per-market IM/MM check — cross-margin enforcement is "soft", via keeper `Rebalance`. The hard-cross-margin path (mirror engine equity/notional/MM/IM math, decode fresh Pyth oracle per market, sum across enrolled accounts before allowing the CPI) is the next major design item. Per (2) above, cached prices are not acceptable here. |
-| Squads-style custody recipe | The wrapper supports it architecturally — owner is a `Pubkey`, can be a Squads multisig PDA — but there is no documented "init portfolio with Squads as owner" flow. To be added once Squads SDK integration is decided. |
+| **Pre-trade aggregate margin check** | Trade currently relies on the engine's per-market IM/MM check — cross-margin enforcement is "soft", via keeper `Rebalance`. The hard-cross-margin path (mirror engine equity/notional/MM/IM math, decode fresh Pyth oracle per market, sum across enrolled accounts before allowing the CPI) is the next major design item. Scaffolded in `src/margin.rs` and `src/pyth.rs` — math + decoders are stubs awaiting fill-in. Per (2) above, cached prices are not acceptable here. |
+| Margin math fill-in | `src/margin.rs` documents the engine functions to mirror (`account_equity_maint_raw`, `notional_checked`, MM/IM computations) but the bodies are stubs. Filling in requires either a slab raw-byte decoder (preferred — keeps decoupled-from-engine-crate property) or adding `percolator` as a read-only dep. |
+| Pyth decoder fill-in | `src/pyth.rs` documents the `PriceUpdateV2` decode contract but the body is a stub. Need to bake in the Pyth Receiver program ID, account magic, and field offsets. |
 | Off-chain keeper bot | Designed, not written. Watches enrolled markets, computes portfolio health, submits `Rebalance` when buffer breached. |
 | Real program ID | Currently a placeholder. Needs `solana-keygen grind` before deployment. |
 | Conservation tests | Framework is in place (`tests/test_conservation.rs`); INV-1 is active, INV-2 through INV-6 are gated on `EnrollMarketAndInit`. |
