@@ -183,6 +183,15 @@ pub mod errors {
         /// not a percolator-prog market, or schema drift after an
         /// upstream sync wave.
         MarginSlabDecodeFailed = 31,
+        /// Defense 3 / RebalanceCrank: destination account is already
+        /// at or above its per-market initial margin, so no rebalance
+        /// is needed and no bounty is paid. The caller wasted CU and
+        /// should retry only when an account actually drops below IM.
+        CrankNotNeeded = 32,
+        /// Defense 3 / RebalanceCrank: from_idx == to_idx, or the
+        /// from and to slabs are the same and indices match. Self-
+        /// rebalance is meaningless.
+        CrankSelfLeg = 33,
     }
 
     impl From<PortfolioError> for ProgramError {
@@ -447,6 +456,29 @@ pub mod instruction {
             expected_idx: u16,
             fee_payment: u64,
         },
+
+        /// Tag 13. Permissionless rebalance crank — Defense 3 of soft+
+        /// cross-margin. ANY signer can call this to move collateral
+        /// between two enrolled markets, but the crank ONLY succeeds (and
+        /// only pays the caller a bounty) if the destination account was
+        /// below its per-market initial-margin requirement BEFORE the
+        /// rebalance. This recruits the entire MEV / arbitrage ecosystem
+        /// as effective auxiliary keepers without exposing the portfolio
+        /// to abuse — no rebalance happens unless one is actually needed,
+        /// and a self-rebalance (from_idx == to_idx) is rejected.
+        ///
+        /// Body: u16 from_idx | u16 to_idx | u64 amount = 12 bytes.
+        ///
+        /// Bounty: paid from portfolio_vault to caller_payout_ata,
+        /// capped at min(amount / `CRANK_BOUNTY_DIVISOR`,
+        /// `CRANK_BOUNTY_CAP_UNITS`). v1 = 1% of rebalanced amount,
+        /// capped at 1 USDC base unit (1_000_000 e6). Future versions
+        /// can expose these as portfolio config.
+        RebalanceCrank {
+            from_idx: u16,
+            to_idx: u16,
+            amount: u64,
+        },
     }
 
     impl Instruction {
@@ -620,6 +652,22 @@ pub mod instruction {
                         fee_payment,
                     })
                 }
+                13 => {
+                    // RebalanceCrank body: u16 from_idx | u16 to_idx | u64 amount = 12 bytes.
+                    if body.len() != 2 + 2 + 8 {
+                        return Err(PortfolioError::BadInstruction.into());
+                    }
+                    let from_idx = u16::from_le_bytes([body[0], body[1]]);
+                    let to_idx = u16::from_le_bytes([body[2], body[3]]);
+                    let amount = u64::from_le_bytes([
+                        body[4], body[5], body[6], body[7], body[8], body[9], body[10], body[11],
+                    ]);
+                    Ok(Instruction::RebalanceCrank {
+                        from_idx,
+                        to_idx,
+                        amount,
+                    })
+                }
                 _ => Err(PortfolioError::BadInstruction.into()),
             }
         }
@@ -726,6 +774,11 @@ pub mod processor {
                 expected_idx,
                 fee_payment,
             } => enroll_market_and_init(program_id, accounts, expected_idx, fee_payment),
+            Instruction::RebalanceCrank {
+                from_idx,
+                to_idx,
+                amount,
+            } => rebalance_crank(program_id, accounts, from_idx, to_idx, amount),
             Instruction::UnenrollMarket { account_idx } => {
                 unenroll_market(program_id, accounts, account_idx)
             }
@@ -1179,6 +1232,251 @@ pub mod processor {
             pa.enrolled[count].last_seen_eq_e6 = 0;
             pa.enrolled[count]._pad0 = [0u8; 6];
             pa.enrolled_count = (count + 1) as u8;
+        }
+
+        Ok(())
+    }
+
+    /// Defense 3 — permissionless rebalance crank.
+    ///
+    /// Anyone can call. Wrapper moves `amount` collateral from the
+    /// `from_idx` enrolled account to the `to_idx` enrolled account,
+    /// paying the caller a bounty IF — and only if — the destination
+    /// was below its per-market initial margin BEFORE the rebalance.
+    /// This recruits MEV / arbitrage bots as auxiliary keepers without
+    /// inviting waste: no rebalance triggers the bounty, and a self-
+    /// rebalance is rejected.
+    ///
+    /// Bounty formula: `min(amount / CRANK_BOUNTY_DIVISOR, CRANK_BOUNTY_CAP_UNITS)`
+    /// where CRANK_BOUNTY_DIVISOR = 100 (1% of moved amount) and
+    /// CRANK_BOUNTY_CAP_UNITS = 1_000_000 (1 USDC at e6).
+    ///
+    /// Account layout (15 fixed):
+    ///   0. `[signer]`            caller (any signer; bounty recipient)
+    ///   1. `[writable]`          portfolio_data PDA
+    ///   2. `[]`                  portfolio_auth PDA
+    ///   3. `[writable]`          portfolio_vault token account
+    ///   4. `[writable]`          caller_payout_ata (bounty destination)
+    ///   5. `[]`                  spl_token_program
+    ///   6. `[]`                  clock sysvar
+    ///   7. `[]`                  percolator-prog (executable)
+    ///   8. `[writable]`          from_slab
+    ///   9. `[writable]`          from_market_vault
+    ///  10. `[]`                  from_market_vault_authority
+    ///  11. `[]`                  from_oracle
+    ///  12. `[writable]`          to_slab
+    ///  13. `[writable]`          to_market_vault
+    ///  14. `[]`                  to_oracle (for the "needs help" gate)
+    fn rebalance_crank(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+        from_idx: u16,
+        to_idx: u16,
+        amount: u64,
+    ) -> ProgramResult {
+        /// Bounty: 1% of rebalanced amount.
+        const CRANK_BOUNTY_DIVISOR: u64 = 100;
+        /// Cap: 1 USDC at e6.
+        const CRANK_BOUNTY_CAP_UNITS: u64 = 1_000_000;
+
+        if accounts.len() != 15 {
+            return Err(PortfolioError::BadAccountCount.into());
+        }
+        let a_caller = &accounts[0];
+        let a_data = &accounts[1];
+        let a_auth = &accounts[2];
+        let a_vault = &accounts[3];
+        let a_payout = &accounts[4];
+        let a_token = &accounts[5];
+        let a_clock = &accounts[6];
+        let a_percolator_prog = &accounts[7];
+        let a_from_slab = &accounts[8];
+        let a_from_vault = &accounts[9];
+        let a_from_vault_auth = &accounts[10];
+        let a_from_oracle = &accounts[11];
+        let a_to_slab = &accounts[12];
+        let a_to_vault = &accounts[13];
+        let a_to_oracle = &accounts[14];
+
+        // Cheap validations first.
+        if amount == 0 {
+            return Err(PortfolioError::ZeroAmount.into());
+        }
+        // Self-leg rejection: rebalancing within the same (slab, idx) is
+        // a no-op + the bounty would be unearned. Match the Rebalance
+        // ix's own guard.
+        if a_from_slab.key == a_to_slab.key && from_idx == to_idx {
+            return Err(PortfolioError::CrankSelfLeg.into());
+        }
+        if !a_caller.is_signer {
+            return Err(PortfolioError::WrongSigner.into());
+        }
+        verify_token_program(a_token)?;
+        verify_percolator_program(a_percolator_prog)?;
+
+        // Read portfolio state once: verify both endpoints are enrolled
+        // and not paused.
+        let auth_bump: u8;
+        let vault_bump: u8;
+        let user_pubkey_bytes: [u8; 32];
+        {
+            let data = a_data.try_borrow_data()?;
+            if data.len() < POOL_SIZE {
+                return Err(PortfolioError::AccountNotInitialized.into());
+            }
+            let pa: &PortfolioAccount = bytemuck::from_bytes(&data[..POOL_SIZE]);
+            if pa.magic != MAGIC {
+                return Err(PortfolioError::BadMagic.into());
+            }
+            if pa.version != VERSION {
+                return Err(PortfolioError::BadVersion.into());
+            }
+            if pa.paused != 0 {
+                return Err(PortfolioError::Paused.into());
+            }
+            if find_enrolled(pa, a_from_slab.key, from_idx).is_none() {
+                return Err(PortfolioError::MarketNotEnrolled.into());
+            }
+            if find_enrolled(pa, a_to_slab.key, to_idx).is_none() {
+                return Err(PortfolioError::MarketNotEnrolled.into());
+            }
+            auth_bump = pa.auth_bump;
+            vault_bump = pa.vault_bump;
+            user_pubkey_bytes = pa.owner;
+        }
+        if vault_bump == 0 {
+            return Err(PortfolioError::AccountNotInitialized.into());
+        }
+
+        // Verify PDAs derive correctly (defence-in-depth).
+        let user_pubkey = Pubkey::new_from_array(user_pubkey_bytes);
+        let expected_auth = Pubkey::create_program_address(
+            &[PORTFOLIO_AUTH_SEED, user_pubkey.as_ref(), &[auth_bump]],
+            program_id,
+        )
+        .map_err(|_| PortfolioError::BadPda)?;
+        if expected_auth != *a_auth.key {
+            return Err(PortfolioError::BadPda.into());
+        }
+        let expected_vault = Pubkey::create_program_address(
+            &[PORTFOLIO_VAULT_SEED, user_pubkey.as_ref(), &[vault_bump]],
+            program_id,
+        )
+        .map_err(|_| PortfolioError::BadPda)?;
+        if expected_vault != *a_vault.key {
+            return Err(PortfolioError::BadPda.into());
+        }
+
+        // ── The "needs help" gate ───────────────────────────────────────
+        // Decode the destination slab, get its account, decode its
+        // fresh oracle, and check engine.is_above_initial_margin. The
+        // crank is only payable if dest was BELOW IM before the
+        // rebalance — otherwise the caller did unnecessary work and
+        // gets nothing. The borrow on to_slab data is released before
+        // the CPIs below (which will re-borrow writably).
+        let now_unix_ts = Clock::from_account_info(a_clock)?.unix_timestamp;
+        {
+            let to_data = a_to_slab.try_borrow_data()?;
+            let engine = percolator_prog::zc::engine_ref(&to_data)
+                .map_err(|_| PortfolioError::MarginSlabDecodeFailed)?;
+            let to_idx_usize = to_idx as usize;
+            if to_idx_usize >= percolator::MAX_ACCOUNTS || !engine.is_used(to_idx_usize) {
+                return Err(PortfolioError::MarginSlabNotEnrolled.into());
+            }
+            let to_account = &engine.accounts[to_idx_usize];
+            let oracle_price = pyth::read_oracle_price_e6(a_to_oracle, &to_data, now_unix_ts)?;
+            if engine.is_above_initial_margin(to_account, to_idx_usize, oracle_price) {
+                // Destination is already healthy — no rebalance needed.
+                return Err(PortfolioError::CrankNotNeeded.into());
+            }
+        }
+
+        // ── Execute the rebalance leg (Withdraw then Deposit) ────────────
+        let auth_seeds: &[&[u8]] = &[PORTFOLIO_AUTH_SEED, user_pubkey.as_ref(), &[auth_bump]];
+
+        let wd_ix = cpi_helpers::percolator_withdraw_collateral(
+            *a_percolator_prog.key,
+            *a_auth.key,
+            *a_from_slab.key,
+            *a_from_vault.key,
+            *a_vault.key,
+            *a_from_vault_auth.key,
+            *a_token.key,
+            *a_clock.key,
+            *a_from_oracle.key,
+            from_idx,
+            amount,
+        );
+        invoke_signed(
+            &wd_ix,
+            &[
+                a_auth.clone(),
+                a_from_slab.clone(),
+                a_from_vault.clone(),
+                a_vault.clone(),
+                a_from_vault_auth.clone(),
+                a_token.clone(),
+                a_clock.clone(),
+                a_from_oracle.clone(),
+                a_percolator_prog.clone(),
+            ],
+            &[auth_seeds],
+        )?;
+
+        let dep_ix = cpi_helpers::percolator_deposit_collateral(
+            *a_percolator_prog.key,
+            *a_auth.key,
+            *a_to_slab.key,
+            *a_vault.key,
+            *a_to_vault.key,
+            *a_token.key,
+            *a_clock.key,
+            to_idx,
+            amount,
+        );
+        invoke_signed(
+            &dep_ix,
+            &[
+                a_auth.clone(),
+                a_to_slab.clone(),
+                a_vault.clone(),
+                a_to_vault.clone(),
+                a_token.clone(),
+                a_clock.clone(),
+                a_percolator_prog.clone(),
+            ],
+            &[auth_seeds],
+        )?;
+
+        // ── Pay the caller bounty from portfolio_vault ─────────────────
+        // Capped at min(amount / divisor, cap). Saturating divide
+        // handles small `amount` cleanly (yields 0 → no bounty for
+        // dust-sized cranks). Bounty signer is portfolio_auth via PDA.
+        let bounty = core::cmp::min(amount / CRANK_BOUNTY_DIVISOR, CRANK_BOUNTY_CAP_UNITS);
+        if bounty > 0 {
+            let bounty_ix = cpi_helpers::spl_token_transfer(
+                *a_vault.key,
+                *a_payout.key,
+                *a_auth.key,
+                bounty,
+            );
+            invoke_signed(
+                &bounty_ix,
+                &[
+                    a_vault.clone(),
+                    a_payout.clone(),
+                    a_auth.clone(),
+                    a_token.clone(),
+                ],
+                &[auth_seeds],
+            )?;
+        }
+
+        // Update last_rebalance_slot for monitoring.
+        {
+            let mut data = a_data.try_borrow_mut_data()?;
+            let pa: &mut PortfolioAccount = from_bytes_mut(&mut data[..POOL_SIZE]);
+            pa.last_rebalance_slot = Clock::get()?.slot;
         }
 
         Ok(())
@@ -2823,7 +3121,7 @@ pub mod proofs {
     #[kani::unwind(70)]
     fn decode_unknown_tag_rejected() {
         let tag: u8 = kani::any();
-        kani::assume(tag >= 13); // tags 0..=12 are now valid (12 = EnrollMarketAndInit)
+        kani::assume(tag >= 14); // tags 0..=13 are now valid (13 = RebalanceCrank)
         let len: usize = kani::any();
         kani::assume(len >= 1 && len <= 64);
         let mut buf = [0u8; 64];
@@ -2901,6 +3199,51 @@ pub mod proofs {
             } => {
                 assert!(ei == expected_idx);
                 assert!(fp == fee_payment);
+            }
+            _ => kani::cover!(false, "wrong variant"),
+        }
+    }
+
+    /// Strict-length proof for tag 13 (RebalanceCrank): body =
+    /// 2 + 2 + 8 = 12. Total = 13.
+    #[kani::proof]
+    #[kani::unwind(70)]
+    fn decode_strict_length_tag13_rebalance_crank() {
+        let len: usize = kani::any();
+        kani::assume(len <= 64 && len >= 1 && len != 13);
+        let mut buf = [0u8; 64];
+        buf[0] = 13;
+        for i in 1..len {
+            buf[i] = kani::any();
+        }
+        let r = Instruction::decode(&buf[..len]);
+        assert!(r.is_err());
+    }
+
+    /// Round-trip proof for tag 13 (RebalanceCrank).
+    #[kani::proof]
+    #[kani::unwind(70)]
+    fn encode_decode_roundtrip_rebalance_crank() {
+        let from_idx: u16 = kani::any();
+        let to_idx: u16 = kani::any();
+        let amount: u64 = kani::any();
+
+        let mut buf = [0u8; 32];
+        buf[0] = 13;
+        buf[1..3].copy_from_slice(&from_idx.to_le_bytes());
+        buf[3..5].copy_from_slice(&to_idx.to_le_bytes());
+        buf[5..13].copy_from_slice(&amount.to_le_bytes());
+
+        let r = Instruction::decode(&buf[..13]).expect("must decode");
+        match r {
+            Instruction::RebalanceCrank {
+                from_idx: f,
+                to_idx: t,
+                amount: a,
+            } => {
+                assert!(f == from_idx);
+                assert!(t == to_idx);
+                assert!(a == amount);
             }
             _ => kani::cover!(false, "wrong variant"),
         }
