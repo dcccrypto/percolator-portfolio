@@ -65,13 +65,12 @@ pub const TEST_FEED_ID: [u8; 32] = [0xABu8; 32];
 /// Slab size — must match the .so's compile-time SLAB_LEN exactly. The
 /// build at `~/percolator-prog/target/deploy/percolator_prog.so` is the
 /// small-tier (MAX_ACCOUNTS=256). If percolator-prog is rebuilt without
-/// `--features small`, this needs to bump to `1_525_712`.
+/// `--features small`, this jumps to ~1.5MB (medium tier).
 ///
-/// Verified 2026-05-10 against the small-tier .so by reading the
-/// `sol_log_64(SLAB_LEN, data.len(), …)` from the InitMarket
-/// invocation: expected `0x17a08`, harness was previously `0x17a10`,
-/// engine schema shrank 8 bytes after Wave 0 of the upstream sync.
-pub const SLAB_LEN: usize = 96_776;
+/// Re-verify on every upstream sync wave: read the
+/// `sol_log_64(SLAB_LEN, data.len(), …)` from a failed InitMarket;
+/// the first hex value (SLAB_LEN) is the new size.
+pub const SLAB_LEN: usize = 96_784;
 
 /// Token v3 Account size.
 pub const TOKEN_ACCOUNT_LEN: usize = 165;

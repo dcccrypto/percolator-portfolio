@@ -28,13 +28,30 @@ between enrolled markets.
 
 ## What this is and isn't
 
-It's USDC cross-margin: one user, one collateral pool, multiple
-percolator markets. Profits in market A can backstop losses in market B
-because an off-chain keeper rebalances collateral between them.
+It's **USDC cross-margin**: one user, one collateral pool, multiple
+percolator markets. Profits in market A backstop losses in market B —
+not because the engine allows individual accounts to run below their
+per-market margin (it doesn't, by design), but because the wrapper
+moves collateral between markets via three layered defenses:
+
+- **Pre-trade aggregate IM check** rejects trades that would push the
+  portfolio's total equity below total IM, even when each individual
+  account looks fine to the engine.
+- **Permissionless rebalance crank** lets anyone (you, an MEV bot,
+  anyone watching Pyth) top up an at-risk account in exchange for a
+  small bounty — recruits arbitrage as auxiliary keepers.
+- **A canonical keeper bot** can run alongside both, doing the
+  steady-state work without paying itself the bounty.
 
 It's **not** cross-collateral: only USDC is supported. Multi-asset
 collateral (SOL, BTC, etc.) is out of scope — that's the harder problem
 with a much larger oracle attack surface.
+
+It's **not** true Hyperliquid-style hard cross-margin: individual
+accounts cannot run below their per-market maintenance margin
+(the engine still enforces that). What we ship instead is a
+defence-in-depth that prevents accounts from ever falling that far
+in practice. The user-felt behaviour is ~95% of the same thing.
 
 ## Three PDAs per user
 
@@ -54,7 +71,7 @@ what `portfolio_vault` is — a per-user SPL Token account whose owner
 is the PDA. Each Deposit becomes two transfers (user_ata → vault →
 market_vault) at the cost of a small CU overhead.
 
-## Instructions (13 total)
+## Instructions (14 total)
 
 | Tag | Instruction | Signer | Implemented |
 |---|---|---|---|
@@ -75,9 +92,10 @@ market_vault) at the cost of a small CU overhead.
 
 Recommended setup flow: `InitPortfolio` → `InitVault` → `EnrollMarketAndInit × N`
 (transfers `fee_payment` from user_ata, signs `InitUser` as `portfolio_auth`,
-records the slot). Then `Deposit` to fund trading capital. The keeper
-rebalances collateral between enrolled markets when a per-market account
-approaches its local maintenance margin.
+records the slot). Then `Deposit` to fund trading capital and `Trade` to
+open positions. Cross-margin behaviour comes from the three defenses
+detailed below — primarily `RebalanceCrank` (anyone can call) keeping
+per-market accounts topped up before they breach MM.
 
 ## Cross-margin model: soft+ (Defense 1 + Defense 3)
 
@@ -153,15 +171,20 @@ constraint every DeFi perp has.
 
 ## Verification
 
-- **97 integration tests** under `tests/`: state-mutation verification
-  for happy paths, specific `PortfolioError` discriminant assertions
-  for every rejection path, surgical field-corruption tests, e2e tests
-  loading the real `percolator-prog` BPF binary.
-- **25 Kani proofs** under `cfg(kani)` covering struct layout (size +
-  alignment + zeroed init), instruction decode (never panics on
-  arbitrary input, deterministic, per-tag strict-length), encode/decode
-  round-trip, and bounds predicates.
-- **CU bounds** pinned per instruction in `tests/test_cu_benchmark.rs`.
+- **96 integration tests** under `tests/` (96/96 pass): state-mutation
+  verification for happy paths, specific `PortfolioError` discriminant
+  assertions for every rejection path, surgical field-corruption tests,
+  e2e tests loading the real `percolator-prog` BPF binary, CU bounds
+  pinned per instruction.
+- **36 Kani proofs** under `cfg(kani)` (36/36 verified) covering:
+  struct layout (size + alignment + zeroed init), instruction decode
+  (never panics on arbitrary input, deterministic, per-tag strict-
+  length), encode/decode round-trip for every tag, bounds predicates,
+  and the new margin-math invariants (`project_basis` saturation,
+  `im_req_from_notional` floor + concrete cases, `cast_aggregate_im_req`
+  saturation, `aggregate_admissible` comparison direction, spec §9.1
+  basis-zero short-circuit).
+- **SBF build clean** with no warnings on our code.
 
 ```sh
 cargo build-sbf -- --locked      # BPF binary
@@ -174,7 +197,9 @@ cargo kani --features kani       # all Kani proofs
 ```
 src/
 ├── portfolio.rs          program: state, instructions, processor, kani proofs
-└── cpi.rs                CPI builders for percolator-prog + spl-token
+├── cpi.rs                CPI builders for percolator-prog + spl-token
+├── margin.rs             Defense 1 aggregate-IM math + 7 Kani proofs
+└── pyth.rs               oracle decoder (delegates to percolator-prog)
 
 tests/
 ├── common/
@@ -222,28 +247,25 @@ that are now load-bearing here:
    `owner`; the engine never sees the signer set change.
 
 2. **Engine read-views are not authoritative for trade admission.**
-   Toly's review on the proposed `GetAccountHealth` ix made the point
-   explicitly: a cached-`last_oracle_price` view doesn't reflect the
-   crank/target-lag design, and so cannot be used as a pre-trade
-   admission gate. The wrapper's pre-trade aggregate margin check (when
-   it lands) MUST use a fresh Pyth price for each market, not the
-   slab's cached price, and MUST mirror the engine's equity / margin
-   math rather than relying on a slab snapshot. The cost of mirroring
-   is the wrapper's problem, not the engine's API surface.
+   Toly's #87 review made the point explicitly: a
+   cached-`last_oracle_price` view doesn't reflect the crank/target-lag
+   design, and so cannot be used as a pre-trade admission gate. The
+   wrapper's Defense 1 aggregate-IM check therefore decodes a fresh
+   Pyth oracle for each enrolled market on every Trade — via the same
+   `percolator_prog::oracle::read_pyth_price_e6` helper percolator-prog
+   uses internally, honouring each market's own staleness + confidence
+   policy from its MarketConfig.
 
-3. **Soft cross-margin, not hard.** The engine's per-account
-   `is_above_initial_margin` runs against a fresh oracle inside every
-   `TradeCpi` invocation we issue — that's the admission gate. The
-   wrapper does NOT do a parallel aggregate-IM check, because doing so
-   would mean either (a) duplicating engine math wrapper-side and
-   re-pinning on every engine schema change, or (b) adding an engine
-   API the maintainer has rejected. Cross-margin behaviour comes from
-   one shared USDC vault that the keeper rebalances between markets —
-   surplus from market A tops up market B before B's individual MM is
-   breached. The user-visible effect is "profits in A backstop losses
-   in B" without ever asking the engine to allow an individual account
-   to run below its per-market MM. See `src/margin.rs` for the full
-   design-boundary writeup.
+3. **Soft+ cross-margin: engine enforces per-account, wrapper enforces
+   portfolio aggregate.** The engine's per-account
+   `is_above_initial_margin` runs against the fresh oracle inside every
+   `TradeCpi` invocation we issue — that's the *safety* gate. On top of
+   that the wrapper layers two additional gates (Defenses 1 and 3) that
+   make the user-felt behaviour ~95% of true hard cross-margin. The
+   "cost of mirroring" engine math is borne by the wrapper, accepted
+   deliberately: re-pin + re-test on every upstream sync wave is cheap
+   compared to losing aggregate enforcement. See "Cross-margin model"
+   above for the full mechanics.
 
 4. **No engine ABI surface added for owner rotation.** The maintainer's
    concern on the proposed `UpdateAccountOwner` was that an
@@ -256,16 +278,16 @@ that are now load-bearing here:
    minimal and consistent.
 
 These constraints are why the wrapper:
-- depends on `percolator` (the engine crate) only as a read-only type
-  source so structs can be addressed without re-implementing layout,
-- does not propose engine API additions for read-views or rotation, and
-- ships soft cross-margin: engine enforces per-account IM/MM with a
-  fresh oracle on every TradeCpi we issue; the keeper handles the
-  cross-market collateral movement that gives users the
-  "one-pool-many-markets" UX. Hard cross-margin (true aggregate IM
-  enforcement that lets one account run below its per-market MM if
-  another covers it) would require engine changes the maintainer
-  has rejected and is explicitly out of scope.
+- depends on `percolator` and `percolator-prog` (with `no-entrypoint`)
+  as read-only type + decoder sources — so it can decode slabs and
+  call public engine helpers without re-implementing struct layouts,
+- does not propose engine API additions for read-views or rotation,
+- ships **soft+ cross-margin**: engine enforces per-account IM/MM on
+  every TradeCpi (fresh oracle); the wrapper adds pre-trade aggregate
+  IM enforcement (Defense 1) and a permissionless rebalance crank
+  (Defense 3) that recruits MEV bots as auxiliary keepers. True hard
+  cross-margin (individuals allowed below per-market MM) is
+  out-of-scope-by-design — would require the engine PR closed in #58.
 
 ## Squads-style custody (recipe)
 
@@ -333,12 +355,11 @@ keys/signers internally." The recipe above is that pattern.
 
 | | |
 |---|---|
+| Off-chain keeper bot (canonical operator) | Reference implementation not written. Watches enrolled markets, computes per-account margin against fresh oracles, submits `Rebalance` when buffer breached. `RebalanceCrank` being permissionless means third parties will also crank for the bounty, but the canonical operator handles the steady-state. **This is the only thing that has to be running for cross-margin to deliver its full value in practice** — without any rebalancer, the system degrades to N isolated markets sharing a deposit vault. |
 | Atomic `TradeWithRebalance` ix | Deferred — clients can compose `RebalanceCrank` + `Trade` into a single transaction for the same atomicity guarantee without bloating the on-chain account list. See "Atomic trade-with-rebalance" section above. |
-| Off-chain keeper bot (canonical operator) | Reference implementation not written. Watches enrolled markets, computes per-account margin against fresh oracles, submits `Rebalance` (or `RebalanceCrank` from a separate keypair to claim the bounty) when buffer breached. With `RebalanceCrank` permissionless, third parties will also crank — but the canonical operator handles the steady-state. |
-| Off-chain keeper bot | Designed, not written. Watches enrolled markets, computes portfolio health, submits `Rebalance` when buffer breached. |
 | Real program ID | Currently a placeholder. Needs `solana-keygen grind` before deployment. |
-| Conservation tests | Framework is in place (`tests/test_conservation.rs`); INV-1 is active, INV-2 through INV-6 are gated on `EnrollMarketAndInit`. |
-| Engine pin tracking | The engine + wrapper-prog repos this consumes are mid-sync to upstream Toly across an 8-wave plan (~3-4 weeks). Each wave that changes RiskEngine schema (Waves 1, 4, 5, 6) requires re-pinning + re-testing the margin port (when present). Tracked in `~/wrapper-engine-deep-audit/FULL_SYNC_PLAN.md`. |
+| External audit | Required before mainnet. The 36 Kani proofs + 96 integration tests are the pre-audit floor; a wrapper of this shape will still want an external review. |
+| Engine pin tracking | The engine + wrapper-prog repos this consumes are mid-sync to upstream Toly across an 8-wave plan. Each wave that changes RiskEngine schema (Waves 1, 4, 5, 6) requires re-pinning + re-testing — `cargo build` fails loudly on schema drift since we depend on the engine crate as a type source, so this is "noisy breakage, easy to fix" not silent corruption. Tracked in `~/wrapper-engine-deep-audit/FULL_SYNC_PLAN.md`. |
 
 ## License
 
