@@ -1,82 +1,167 @@
-//! # Wrapper-side margin math — DESIGN BOUNDARY DOCUMENT, not a stub.
+//! Wrapper-side aggregate IM enforcement — Defense 1 of soft+ cross-margin.
 //!
-//! After re-reading the upstream maintainer's #87 close (2026-05-10), the
-//! work this module *appeared* to need is not actually wanted by the
-//! design. Leaving an empty stub would invite well-meaning future
-//! maintainers to fill it in unnecessarily, so this module exists to
-//! document why it stays empty.
+//! Per the upstream maintainer's #87 review, engine-side per-account IM/MM
+//! is the safety gate. This module is a **supplementary product feature**
+//! that adds pre-trade portfolio-level enforcement on top of that gate:
+//! before submitting a Trade CPI, the wrapper iterates every enrolled
+//! market, computes `(equity_i, im_req_i)` against a fresh-this-slot
+//! oracle, and rejects the trade if `sum(equity_i) < sum(im_req_i)`.
 //!
-//! ## Two cross-margin models
+//! What this catches that engine-alone does not:
+//! - Portfolio-level insolvency where the trade target is healthy
+//!   individually but other enrolled accounts are bleeding into the red.
+//! - Trades that would individually pass engine per-account IM but push
+//!   the portfolio's aggregate IM headroom below zero.
 //!
-//! **Soft cross-margin (what we ship):**
-//!   - `portfolio_auth` PDA owns one engine account per enrolled market.
-//!   - Each market's engine enforces its own IM/MM on every Deposit /
-//!     Trade / Withdraw via `is_above_initial_margin` /
-//!     `is_above_maintenance_margin`, using the oracle account passed by
-//!     the caller (always fresh in our `Trade` ix's CPI to TradeCpi).
-//!   - One USDC vault under `portfolio_auth` lets the keeper rebalance
-//!     collateral between markets atomically — moving surplus from a
-//!     well-capitalised account into one approaching its per-market MM
-//!     before it gets liquidated.
-//!   - Net behaviour: profits in market A can backstop losses in market B
-//!     because the keeper moves the capital across, while the engine's
-//!     per-market admission check still catches every bad trade.
+//! What this does NOT do:
+//! - Allow individual accounts to run below per-market MM — the engine
+//!   still enforces that at execution. True Hyperliquid-style hard
+//!   cross-margin requires the engine PR closed in #58. See
+//!   `crate::margin` doc-comment above for the full rationale.
 //!
-//! **Hard cross-margin (what we do NOT ship):**
-//!   - The wrapper would compute *aggregate* portfolio equity vs
-//!     *aggregate* IM_req across all enrolled markets, allow individual
-//!     accounts to be below their per-market MM as long as the portfolio
-//!     total covers it, and override the engine's per-account check.
-//!   - This requires either an engine API to disable per-account checks
-//!     under wrapper authority, OR a wrapper-side mirror of the engine's
-//!     full equity / notional / IM math reading every enrolled slab.
+//! ## Math (mirrors engine `is_above_initial_margin` per account)
 //!
-//! ## Why hard cross-margin doesn't ship
+//! For each enrolled account `i`:
+//!   eq_i      = engine.account_equity_maint_raw(account_i)      // i128
+//!   basis_i   = projected_basis_i.unwrap_or(account_i.position_basis_q)
+//!   notional_i = ceil(|basis_i| × oracle_price_i / POS_SCALE)   // u128
+//!   prop_i    = floor(notional_i × initial_margin_bps / 10_000) // u128
+//!   im_req_i  = max(prop_i, params.min_nonzero_im_req)          // u128
 //!
-//! 1. **The upstream maintainer reviewed and closed exactly that proposal.**
-//!    `aeyakovenko/percolator#58`, `aeyakovenko/percolator-prog#87`,
-//!    `aeyakovenko/percolator-prog#88` (closed 2026-05-10) collectively
-//!    rejected: an engine `account_health_snapshot` view, an engine
-//!    `transfer_owner`, and a wrapper `GetAccountHealth` ix. The stated
-//!    reason was that any such API expands engine authority surface
-//!    around withdrawals, close, fee credit, self-crank auth, and trade
-//!    authorization — for a feature the existing per-account check
-//!    already covers when the wrapper PDA is the account owner.
+//! Aggregate gate:
+//!   total_eq      = saturating_sum(eq_i)                         // i128
+//!   total_im_req  = saturating_sum(im_req_i) → cast to i128       // i128
+//!   ok iff total_eq >= total_im_req
 //!
-//! 2. **The "fresh oracle" point is already satisfied.** The engine's
-//!    per-account margin check inside `TradeCpi` runs against whatever
-//!    oracle account the caller passes. Our `Trade` ix forwards the user-
-//!    supplied oracle straight through — that's a fresh oracle this slot.
-//!    The cached-price concern in #87 was about adding a *separate* view
-//!    instruction that would have used `engine.last_oracle_price` (cached)
-//!    as its oracle. We don't add that view.
+//! ## ADL handling (v1)
 //!
-//! 3. **Mirroring the engine math wrapper-side is fragile and unnecessary.**
-//!    Even with our `percolator` engine crate dep giving us the Account
-//!    struct for free, we'd still need to reproduce internal scaling
-//!    (unit_scale, ADL multipliers, B-tracking once Wave 5 lands) for
-//!    a number we'd then compare against an aggregate the engine has no
-//!    concept of. Re-pinning + re-validating that math on every engine
-//!    schema change is real cost; the soft-cross-margin model gets the
-//!    same user-visible behaviour through the keeper without it.
-//!
-//! ## What this module would contain if we built hard cross-margin later
-//!
-//! For the record (and so a future audit doesn't have to re-derive it):
-//!
-//!   per-account equity:  `engine.account_equity_maint_raw(account)`
-//!                          (public on the FORK; capital + pnl − fee_debt;
-//!                           does NOT use oracle — pure realized equity)
-//!   per-account IM_req:   notional × initial_margin_bps / 10_000, where
-//!                          notional = |effective_pos_q| × oracle / scale
-//!                          (`engine.notional_checked` is private; would
-//!                           need either visibility lift or wrapper-side
-//!                           reproduction)
-//!   per-account MM_req:   notional × maintenance_margin_bps / 10_000
-//!   aggregate gate:       sum_equity ≥ sum_IM_req  (with new-trade
-//!                          increment from `account_equity_trade_open_raw`)
-//!
-//! All of this would live behind a `hard_cross_margin` cargo feature so
-//! the soft default stays the canonical ship.
+//! Engine internally uses `effective_pos_q_checked` which applies ADL
+//! multipliers to `position_basis_q`. We use `position_basis_q` directly,
+//! which equals `effective_pos_q` outside of active ADL events. During
+//! ADL, our aggregate IM_req is slightly off (basis vs effective), but
+//! the engine's per-account check at TradeCpi time still catches any
+//! per-account violation — so wrapper-side ADL imprecision is
+//! conservative-or-equal, never unsafe. Documented limitation.
 
 #![allow(dead_code)]
+
+use percolator::wide_math::{mul_div_ceil_u128, mul_div_floor_u128};
+use percolator::{Account, RiskEngine, POS_SCALE};
+use solana_program::program_error::ProgramError;
+
+use crate::errors::PortfolioError;
+
+/// Read-only view of one enrolled market for aggregate-IM purposes.
+pub struct EnrolledView<'a> {
+    /// Borrowed slab data (output of `AccountInfo::try_borrow_data()`).
+    pub slab_data: &'a [u8],
+    /// Account index inside the engine's `accounts` array.
+    pub account_idx: u16,
+    /// Fresh oracle price (e6) for this market. For the trade target,
+    /// the caller passes the same oracle they'll forward to TradeCpi.
+    /// For other markets, the caller passes that market's current
+    /// oracle account; the wrapper does NOT cross-validate (engine's
+    /// per-account check is the safety gate; aggregate IM is product).
+    pub oracle_price_e6: u64,
+    /// Trade delta (signed q-units) the check should add to this
+    /// account's current `position_basis_q`. `Some(delta)` for the
+    /// trade-target account, `None` for every other enrolled account
+    /// (whose basis is unchanged by this trade).
+    pub trade_delta_q: Option<i128>,
+}
+
+/// Pre-trade aggregate IM check across all enrolled markets.
+///
+/// Decodes each slab via `percolator_prog::zc::engine_ref`, sums per-
+/// account `(equity, im_req)`, and returns `Err` if the aggregate
+/// would breach. On `Ok`, the caller proceeds with the TradeCpi — the
+/// engine's per-account check still runs there and may still reject.
+///
+/// **Engine-coupling note:** the math here is line-for-line the same as
+/// `engine.is_above_initial_margin` (`~/percolator/src/percolator.rs:3868`).
+/// Drift between engine and wrapper here is the wrapper's maintenance
+/// cost — re-pin + re-test on every upstream sync wave that touches
+/// margin-relevant fields. The cost of drift is conservative-or-equal
+/// rejection (wrapper rejects, engine would have accepted), never an
+/// unsafe accept.
+pub fn check_aggregate_im(views: &[EnrolledView<'_>]) -> Result<(), ProgramError> {
+    let mut total_eq: i128 = 0;
+    let mut total_im_req_u128: u128 = 0;
+
+    for view in views.iter() {
+        // Decode the engine view from slab data. `zc::engine_ref` does the
+        // length + alignment + discriminant validation we need.
+        let engine: &RiskEngine = percolator_prog::zc::engine_ref(view.slab_data)
+            .map_err(|_| PortfolioError::MarginSlabDecodeFailed)?;
+
+        let idx = view.account_idx as usize;
+        if idx >= percolator::MAX_ACCOUNTS || !engine.is_used(idx) {
+            return Err(PortfolioError::MarginSlabNotEnrolled.into());
+        }
+
+        let account: &Account = &engine.accounts[idx];
+
+        // ── Equity (no oracle): C + PnL − FeeDebt ─────────────────────
+        let eq = engine.account_equity_maint_raw(account);
+
+        // ── Notional with projected basis ─────────────────────────────
+        // For target: caller passes Some(signed trade delta q); we add
+        // to the current account.position_basis_q to get the post-trade
+        // basis. For others: None → use current basis unchanged.
+        // Saturating add: overflow projects to i128::MIN/MAX, which
+        // produces a worst-case notional and thus conservative reject.
+        let basis_q = match view.trade_delta_q {
+            Some(delta) => account.position_basis_q.saturating_add(delta),
+            None => account.position_basis_q,
+        };
+
+        // Engine's `risk_notional_from_eff_q` is private but its formula
+        // is documented in spec §7 and replicated here exactly:
+        //   notional = ceil(|basis_q| × oracle_price / POS_SCALE)
+        // We use |basis_q| directly; ADL multipliers are skipped (v1).
+        let notional: u128 = if view.oracle_price_e6 == 0 {
+            // Match engine's `try_notional` rejection on zero price.
+            return Err(PortfolioError::MarginNotionalRejected.into());
+        } else {
+            mul_div_ceil_u128(
+                basis_q.unsigned_abs(),
+                view.oracle_price_e6 as u128,
+                POS_SCALE,
+            )
+        };
+
+        // ── IM_req per engine spec §9.1 ───────────────────────────────
+        // eff == 0 short-circuits to im_req = 0; else proportional
+        // floor against bps, then floor at min_nonzero_im_req.
+        let im_req = if basis_q == 0 {
+            0u128
+        } else {
+            let prop = mul_div_floor_u128(
+                notional,
+                engine.params.initial_margin_bps as u128,
+                10_000u128,
+            );
+            core::cmp::max(prop, engine.params.min_nonzero_im_req)
+        };
+
+        // ── Saturating aggregate accumulation ─────────────────────────
+        total_eq = total_eq.saturating_add(eq);
+        total_im_req_u128 = total_im_req_u128.saturating_add(im_req);
+    }
+
+    // ── Cast aggregate IM_req to i128 conservatively ──────────────────
+    // Mirrors engine's saturation: u128 → i128 via `if u > MAX { MAX }`.
+    // An over-i128::MAX aggregate IM_req is treated as unsatisfiable and
+    // rejects the trade (since total_eq is bounded by i128).
+    let total_im_req_i128: i128 = if total_im_req_u128 > i128::MAX as u128 {
+        i128::MAX
+    } else {
+        total_im_req_u128 as i128
+    };
+
+    if total_eq < total_im_req_i128 {
+        return Err(PortfolioError::AggregateImBreach.into());
+    }
+
+    Ok(())
+}

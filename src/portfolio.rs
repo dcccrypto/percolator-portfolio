@@ -160,6 +160,29 @@ pub mod errors {
         /// runtime `AccountBorrowFailed` so callers can disambiguate
         /// "you forgot the writable flag" from "you held two mut borrows".
         DataAccountNotWritable = 25,
+        /// Pre-trade aggregate IM check failed: post-trade portfolio
+        /// equity (sum of `account_equity_maint_raw` across enrolled)
+        /// is below aggregate IM_req. Defense 1 of soft+ cross-margin.
+        AggregateImBreach = 26,
+        /// Wrong number of margin-check accounts. Trade ix must receive
+        /// (slab, oracle) pairs for every enrolled market beyond the
+        /// trade target. Caller-side bug.
+        WrongMarginAccountCount = 27,
+        /// A margin-check slab does not match any enrolled market in the
+        /// portfolio. Caller-side bug.
+        MarginSlabNotEnrolled = 28,
+        /// A margin-check slab appears more than once in the account
+        /// list. Caller-side bug.
+        MarginSlabDuplicate = 29,
+        /// Engine `try_notional` rejected — invalid oracle price or
+        /// account-not-used. Surfaces as a wrapper-level error so
+        /// callers can disambiguate from generic engine errors.
+        MarginNotionalRejected = 30,
+        /// Engine slab data did not decode cleanly via
+        /// `percolator_prog::zc::engine_ref`. Indicates a slab that's
+        /// not a percolator-prog market, or schema drift after an
+        /// upstream sync wave.
+        MarginSlabDecodeFailed = 31,
     }
 
     impl From<PortfolioError> for ProgramError {
@@ -618,6 +641,8 @@ pub mod processor {
     use crate::cpi as cpi_helpers;
     use crate::errors::PortfolioError;
     use crate::instruction::Instruction;
+    use crate::margin;
+    use crate::pyth;
     use crate::state::PortfolioAccount;
     use alloc::vec::Vec;
     use bytemuck::{from_bytes_mut, Zeroable};
@@ -1980,8 +2005,15 @@ pub mod processor {
         size_q: u64,
         limit_price_e6: u64,
     ) -> ProgramResult {
-        // Fixed-account head. Tail is anything past index 11 — passed
-        // through to the matcher CPI verbatim and never inspected here.
+        // Account layout:
+        //   [0..11]                       fixed Trade-CPI accounts (target slab + oracle)
+        //   [11..11 + 2·(N-1)]            (slab_i, oracle_i) pairs for each OTHER enrolled market,
+        //                                  used by Defense 1 (pre-trade aggregate IM check)
+        //   [11 + 2·(N-1) .. accounts.len()]  variadic matcher tail
+        //
+        // N = portfolio.enrolled_count. The caller derives N off-chain
+        // (it's exposed in portfolio_data) and supplies exactly the right
+        // number of margin-check pairs.
         const FIXED: usize = 11;
         if accounts.len() < FIXED {
             return Err(PortfolioError::BadAccountCount.into());
@@ -1997,7 +2029,6 @@ pub mod processor {
         let a_lp_pda = &accounts[8];
         let a_lp_owner = &accounts[9];
         let a_percolator_prog = &accounts[10];
-        let tail = &accounts[FIXED..];
 
         // Surface-validation in order of cost: cheapest checks first so
         // misuse fails before we touch borrow + CPI machinery.
@@ -2020,11 +2051,11 @@ pub mod processor {
         let (auth_bump, _vault_bump) =
             check_portfolio_for_cpi(program_id, a_user, a_data, a_auth)?;
 
-        // Verify (slab, account_idx) is enrolled in this portfolio. The
-        // engine's own owner check would catch a wrong idx anyway, but
-        // surfacing PortfolioError::MarketNotEnrolled gives a clearer
-        // signal than the generic engine error and avoids the CPI cost.
-        // Also verifies paused state in the same borrow scope.
+        // Read enrolled markets in a single borrow scope; collect the
+        // pubkey + idx pairs for Defense 1 cross-validation, plus the
+        // paused gate and target-slab membership check.
+        let enrolled_count: usize;
+        let enrolled_pairs: alloc::vec::Vec<([u8; 32], u16)>;
         {
             let data = a_data.try_borrow_data()?;
             let pa: &PortfolioAccount = bytemuck::from_bytes(&data[..POOL_SIZE]);
@@ -2034,9 +2065,27 @@ pub mod processor {
             if find_enrolled(pa, a_slab.key, account_idx).is_none() {
                 return Err(PortfolioError::MarketNotEnrolled.into());
             }
+            enrolled_count = pa.enrolled_count as usize;
+            let mut pairs = alloc::vec::Vec::with_capacity(enrolled_count);
+            for i in 0..enrolled_count {
+                pairs.push((pa.enrolled[i].market, pa.enrolled[i].account_idx));
+            }
+            enrolled_pairs = pairs;
         }
 
-        // Convert (side, size_q) to signed i128 for TradeCpi:
+        // Slice the margin-check pair region. Tail starts AFTER the
+        // pairs region. With N = enrolled_count, there are N-1 OTHER
+        // enrolled markets (target is at slot 3 + 5 already), so we
+        // expect 2·(N-1) accounts in the pair region.
+        let pair_region_len = 2usize.saturating_mul(enrolled_count.saturating_sub(1));
+        if accounts.len() < FIXED + pair_region_len {
+            return Err(PortfolioError::WrongMarginAccountCount.into());
+        }
+        let pair_region = &accounts[FIXED..FIXED + pair_region_len];
+        let tail = &accounts[FIXED + pair_region_len..];
+
+        // Convert (side, size_q) to signed i128 for TradeCpi and the
+        // aggregate-IM projected basis:
         //   side==0 → long  → +size_q
         //   side==1 → short → -size_q
         // size_q is u64, so always fits in i128 without overflow.
@@ -2045,6 +2094,125 @@ pub mod processor {
         } else {
             -(size_q as i128)
         };
+
+        // ── Defense 1: pre-trade aggregate IM check ─────────────────────
+        // Borrow every relevant slab's data, build EnrolledView per market,
+        // and call `crate::margin::check_aggregate_im`. Engine still
+        // enforces per-account IM at the TradeCpi we issue below — this
+        // is the wrapper-side ADDITIONAL gate, not a replacement.
+        {
+            // Clock for oracle freshness on EVERY enrolled market's
+            // Pyth account. Each market's MarketConfig dictates its own
+            // staleness/conf bounds, applied uniformly via the shared
+            // percolator-prog::oracle::read_pyth_price_e6 helper.
+            let now_unix_ts = Clock::from_account_info(a_clock)?.unix_timestamp;
+
+            // Borrow target slab data. Held across the call to keep the
+            // EnrolledView slice valid. The borrow is released before
+            // the CPI below (which writes the slab).
+            let target_data = a_slab.try_borrow_data()?;
+
+            // Find target's index in the enrolled list and seed seen_mask.
+            let target_slab_bytes = a_slab.key.to_bytes();
+            let mut seen_mask: u32 = 0;
+            let mut target_enrolled_idx: usize = usize::MAX;
+            for (i, (m, idx)) in enrolled_pairs.iter().enumerate() {
+                if *m == target_slab_bytes && *idx == account_idx {
+                    target_enrolled_idx = i;
+                    seen_mask |= 1u32 << i;
+                    break;
+                }
+            }
+            if target_enrolled_idx == usize::MAX {
+                return Err(PortfolioError::MarketNotEnrolled.into());
+            }
+
+            // Decode target's oracle. read_oracle_price_e6 needs the slab
+            // data (to read MarketConfig for feed_id + staleness + conf).
+            let target_oracle_price_e6 =
+                pyth::read_oracle_price_e6(a_oracle, &target_data, now_unix_ts)?;
+
+            // Walk the (slab, oracle) pair region and build views for
+            // every OTHER enrolled market. Track each pair's borrow
+            // separately so all live until the aggregate-check call.
+            // (Solana's AccountInfo holds `Rc<RefCell<&mut [u8]>>`, so
+            //  `try_borrow_data` returns `Ref<&mut [u8]>`, not `Ref<[u8]>`.)
+            let mut other_datas: alloc::vec::Vec<core::cell::Ref<'_, &mut [u8]>> =
+                alloc::vec::Vec::with_capacity(enrolled_count.saturating_sub(1));
+            let mut other_meta: alloc::vec::Vec<(u16, u64)> =
+                alloc::vec::Vec::with_capacity(enrolled_count.saturating_sub(1));
+
+            let mut p = 0;
+            while p < pair_region_len {
+                let a_other_slab = &pair_region[p];
+                let a_other_oracle = &pair_region[p + 1];
+                p += 2;
+
+                let other_slab_bytes = a_other_slab.key.to_bytes();
+                let mut found_enrolled_idx: usize = usize::MAX;
+                for (i, (m, _idx)) in enrolled_pairs.iter().enumerate() {
+                    if *m == other_slab_bytes {
+                        found_enrolled_idx = i;
+                        break;
+                    }
+                }
+                if found_enrolled_idx == usize::MAX {
+                    return Err(PortfolioError::MarginSlabNotEnrolled.into());
+                }
+                let mask_bit = 1u32 << found_enrolled_idx;
+                if (seen_mask & mask_bit) != 0 {
+                    return Err(PortfolioError::MarginSlabDuplicate.into());
+                }
+                seen_mask |= mask_bit;
+
+                // Borrow OTHER slab's data — held until aggregate check.
+                let data = a_other_slab.try_borrow_data()?;
+
+                // Decode this market's oracle using ITS OWN config (each
+                // market can have different feed_id / staleness / conf).
+                let oracle_price_e6 =
+                    pyth::read_oracle_price_e6(a_other_oracle, &data, now_unix_ts)?;
+
+                let (_, idx_pair) = enrolled_pairs[found_enrolled_idx];
+                other_meta.push((idx_pair, oracle_price_e6));
+                other_datas.push(data);
+            }
+
+            // Verify ALL enrolled markets were covered (target + others).
+            let expected_mask: u32 = if enrolled_count >= 32 {
+                u32::MAX
+            } else {
+                (1u32 << enrolled_count) - 1
+            };
+            if seen_mask != expected_mask {
+                return Err(PortfolioError::WrongMarginAccountCount.into());
+            }
+
+            // Build the views slice: target first (with trade_delta_q),
+            // then each other (with None).
+            let mut views: alloc::vec::Vec<margin::EnrolledView<'_>> =
+                alloc::vec::Vec::with_capacity(enrolled_count);
+            views.push(margin::EnrolledView {
+                slab_data: &target_data,
+                account_idx,
+                oracle_price_e6: target_oracle_price_e6,
+                trade_delta_q: Some(size_signed),
+            });
+            for (i, (idx, oracle_price_e6)) in other_meta.iter().enumerate() {
+                views.push(margin::EnrolledView {
+                    slab_data: &other_datas[i],
+                    account_idx: *idx,
+                    oracle_price_e6: *oracle_price_e6,
+                    trade_delta_q: None,
+                });
+            }
+
+            margin::check_aggregate_im(&views)?;
+
+            // Borrows on target_data and other_datas are dropped here
+            // before the CPI below, which will re-borrow target slab
+            // (writable) inside TradeCpi.
+        }
 
         // Build the matcher tail as AccountMeta from the AccountInfo slice.
         // Preserve writable + signer flags from the outer transaction —

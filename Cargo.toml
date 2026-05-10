@@ -35,6 +35,14 @@ bytemuck = { version = "1.14", features = ["derive", "min_const_generics"] }
 # changes (Waves 4/5/6 of the upstream sync) are explicit re-pins +
 # re-tests on the wrapper side, not silent semantic shifts.
 percolator = { path = "../percolator" }
+# percolator-prog with no-entrypoint — gives us the slab layout
+# constants (ENGINE_OFF, ENGINE_LEN, etc.) and Account/RiskEngine
+# accessors without bringing in the program entrypoint (which would
+# collide with our own declare_id!). Toly's #58 close explicitly
+# endorsed on-chain programs reading slab state via passed accounts,
+# which is what we use this for — pre-trade aggregate IM check and
+# atomic rebalance-before-trade fold-in.
+percolator-prog = { path = "../percolator-prog", default-features = false, features = ["no-entrypoint"] }
 # Pins for the SBF toolchain (rustc 1.84, no edition2024). Each of these
 # crates' next-major releases require edition2024, so pin to the last
 # 1.84-compatible version. Same workaround percolator-prog ships with.
