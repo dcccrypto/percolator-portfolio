@@ -1871,6 +1871,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "percolator"
+version = "0.1.0"
+
+[[package]]
 name = "percolator-portfolio"
 version = "0.1.0"
 dependencies = [
@@ -1881,6 +1885,7 @@ dependencies = [
  "indexmap",
  "litesvm",
  "once_cell",
+ "percolator",
  "solana-program",
  "solana-program-runtime",
  "solana-sdk",

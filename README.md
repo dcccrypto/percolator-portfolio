@@ -158,13 +158,19 @@ that are now load-bearing here:
    math rather than relying on a slab snapshot. The cost of mirroring
    is the wrapper's problem, not the engine's API surface.
 
-3. **The wrapper does its own margin math.** Per (2), there is no
-   engine view ABI we can call. To enforce true portfolio-level IM
-   (rather than soft-cross-margin via keeper rebalance), the wrapper
-   needs to port the engine's equity / notional / IM / MM math
-   internally. This is deferred work — see the status table — but the
-   architectural choice is made: we mirror engine math, we accept the
-   maintenance cost, we re-pin and re-test on every engine upgrade.
+3. **Soft cross-margin, not hard.** The engine's per-account
+   `is_above_initial_margin` runs against a fresh oracle inside every
+   `TradeCpi` invocation we issue — that's the admission gate. The
+   wrapper does NOT do a parallel aggregate-IM check, because doing so
+   would mean either (a) duplicating engine math wrapper-side and
+   re-pinning on every engine schema change, or (b) adding an engine
+   API the maintainer has rejected. Cross-margin behaviour comes from
+   one shared USDC vault that the keeper rebalances between markets —
+   surplus from market A tops up market B before B's individual MM is
+   breached. The user-visible effect is "profits in A backstop losses
+   in B" without ever asking the engine to allow an individual account
+   to run below its per-market MM. See `src/margin.rs` for the full
+   design-boundary writeup.
 
 4. **No engine ABI surface added for owner rotation.** The maintainer's
    concern on the proposed `UpdateAccountOwner` was that an
@@ -177,12 +183,16 @@ that are now load-bearing here:
    minimal and consistent.
 
 These constraints are why the wrapper:
-- never depends on the `percolator` engine crate (decoupled
-  CPI-only wire-format coupling), and
+- depends on `percolator` (the engine crate) only as a read-only type
+  source so structs can be addressed without re-implementing layout,
 - does not propose engine API additions for read-views or rotation, and
-- treats pre-trade margin checks as "best-effort soft cross-margin via
-  keeper rebalance" in v1, with a documented path to "hard cross-margin
-  with fresh-oracle aggregate IM" once the margin math is ported.
+- ships soft cross-margin: engine enforces per-account IM/MM with a
+  fresh oracle on every TradeCpi we issue; the keeper handles the
+  cross-market collateral movement that gives users the
+  "one-pool-many-markets" UX. Hard cross-margin (true aggregate IM
+  enforcement that lets one account run below its per-market MM if
+  another covers it) would require engine changes the maintainer
+  has rejected and is explicitly out of scope.
 
 ## Squads-style custody (recipe)
 
@@ -250,9 +260,8 @@ keys/signers internally." The recipe above is that pattern.
 
 | | |
 |---|---|
-| **Pre-trade aggregate margin check** | Trade currently relies on the engine's per-market IM/MM check — cross-margin enforcement is "soft", via keeper `Rebalance`. The hard-cross-margin path (mirror engine equity/notional/MM/IM math, decode fresh Pyth oracle per market, sum across enrolled accounts before allowing the CPI) is the next major design item. Scaffolded in `src/margin.rs` and `src/pyth.rs` — math + decoders are stubs awaiting fill-in. Per (2) above, cached prices are not acceptable here. |
-| Margin math fill-in | `src/margin.rs` documents the engine functions to mirror (`account_equity_maint_raw`, `notional_checked`, MM/IM computations) but the bodies are stubs. Filling in requires either a slab raw-byte decoder (preferred — keeps decoupled-from-engine-crate property) or adding `percolator` as a read-only dep. |
-| Pyth decoder fill-in | `src/pyth.rs` documents the `PriceUpdateV2` decode contract but the body is a stub. Need to bake in the Pyth Receiver program ID, account magic, and field offsets. |
+| Hard cross-margin | Out of scope by design. `src/margin.rs` and `src/pyth.rs` document the constraint explicitly. Soft cross-margin via keeper rebalance is the canonical model; hard cross-margin would require engine API changes the maintainer has rejected. |
+| Test harness `Custom(4)` | `tests/common/integration_env.rs:332` fails on `InitMarket` setup with `Custom(4)`, blocking 5 e2e tests that would otherwise exercise the full Trade / EnrollMarketAndInit flow. Pre-existing, unrelated to recent changes. Needs a separate debugging session. |
 | Off-chain keeper bot | Designed, not written. Watches enrolled markets, computes portfolio health, submits `Rebalance` when buffer breached. |
 | Real program ID | Currently a placeholder. Needs `solana-keygen grind` before deployment. |
 | Conservation tests | Framework is in place (`tests/test_conservation.rs`); INV-1 is active, INV-2 through INV-6 are gated on `EnrollMarketAndInit`. |

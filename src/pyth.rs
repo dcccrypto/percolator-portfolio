@@ -1,99 +1,42 @@
-//! Pyth Price account decoder — fresh oracle reads for trade admission.
+//! # Pyth Price account decoder — DESIGN BOUNDARY DOCUMENT, not a stub.
 //!
-//! Why this exists: the upstream maintainer's review of `GetAccountHealth`
-//! (`aeyakovenko/percolator-prog#87`) was explicit that a cached-price /
-//! no-oracle view is not authoritative for trade admission under the crank
-//! / target-lag design. The wrapper's pre-trade aggregate margin check
-//! must decode a fresh Pyth Price account this slot — not read
-//! `engine.last_oracle_price` from the slab.
+//! The earlier scaffold here implied a wrapper-side fresh-oracle decode
+//! was needed for trade admission. After re-reading the upstream
+//! maintainer's #87 close (2026-05-10), it is not — the engine's
+//! `TradeCpi` already takes an oracle account and runs the
+//! `is_above_initial_margin` check against that fresh price during the
+//! CPI we issue. Our wrapper does not need a parallel decode.
 //!
-//! ## What this decodes
+//! ## Where the oracle actually flows
 //!
-//! Pyth's on-chain `PriceUpdateV2` account format (the one written by the
-//! Pyth Solana Receiver). Fields used:
+//! 1. User submits `portfolio_program::Trade` with a Pyth Price account
+//!    in the variadic matcher tail (or in TradeCpi's fixed slot 4 —
+//!    the engine reads from there).
+//! 2. Wrapper signs `invoke_signed` to `percolator-prog::TradeCpi`.
+//! 3. TradeCpi handler reads the oracle account, validates freshness +
+//!    confidence per the engine's policy, and calls
+//!    `engine.is_above_initial_margin(account, idx, oracle_price, ...)`.
+//! 4. If that returns false, the CPI errors and the txn reverts.
 //!
-//! - `price` (i64) — last published price, scaled by `expo`
-//! - `conf` (u64) — confidence interval
-//! - `expo` (i32) — base-10 exponent on `price` and `conf`
-//! - `publish_time` (i64) — Unix seconds the publisher signed at
+//! At no point does the wrapper need its own decoded price.
 //!
-//! The wrapper validates:
-//! - `publish_time` is recent (within `MAX_PRICE_AGE_SECS` of `Clock.unix_timestamp`)
-//! - `conf / abs(price)` is below a basis-point ceiling (config-driven)
-//! - `expo` matches the market's expected `unit_scale`
+//! ## What changed from the earlier scaffold
 //!
-//! ## Scaling
+//! The earlier `FreshPrice` struct, `PythError` enum, `MAX_PRICE_AGE_SECS`,
+//! `MAX_CONF_BPS`, and `decode_pyth_price` stubs are removed. None of
+//! them have callers and none would have callers under the
+//! soft-cross-margin model (see `crate::margin`). If a future change
+//! adds wrapper-side admission (e.g., per-portfolio leverage cap that
+//! the engine doesn't enforce), this module would be revived with a
+//! decoder against `pyth_solana_receiver_sdk::price_update::PriceUpdateV2`.
 //!
-//! Engine math operates on `oracle_price_e6` (price × 10^6). Pyth's price
-//! is `mantissa × 10^expo`. Conversion:
+//! ## If we did need to decode here later
 //!
-//!   price_e6 = mantissa × 10^(expo + 6)   if expo + 6 >= 0
-//!   price_e6 = mantissa / 10^(-(expo+6))  if expo + 6 < 0
-//!
-//! Saturation on overflow returns `0`, which fails downstream notional /
-//! IM checks conservatively.
-//!
-//! ## What's NOT in this module yet
-//!
-//! - Actual byte-offset decoder (PriceUpdateV2 layout)
-//! - Magic / discriminator validation
-//! - Pyth program ID hardcode (verify the account is owned by the Pyth
-//!   receiver, not an attacker substitute)
-//! - Slot-precision freshness gate (some markets need slot-not-second)
-//!
-//! Each tracked under the aggregate-margin-check task.
+//! `pyth_solana_receiver_sdk` exposes `PriceUpdateV2` directly with a
+//! borsh deserialiser; the wrapper would gain that crate as a dep, decode
+//! `account.data` into `PriceUpdateV2 { price_message, ... }`, gate on
+//! `publish_time` and `conf / abs(price)` ratios, and convert the signed
+//! mantissa+exponent to whatever scale the wrapper math expects. Same
+//! pattern the percolator-prog matcher uses today — no novel design.
 
 #![allow(dead_code)]
-
-/// Decoded fresh oracle price suitable for use in `crate::margin::notional`.
-///
-/// `price_e6` is always non-negative (Pyth signed prices reject negative
-/// quotes upstream — but the engine's notional math is over u128 so we
-/// zero-clamp here defensively).
-pub struct FreshPrice {
-    pub price_e6: u64,
-    pub conf_e6: u64,
-    pub publish_unix_secs: i64,
-}
-
-/// Maximum acceptable Pyth publish-time lag, in seconds. Conservative
-/// default; will be config-driven once admission policy is wired.
-pub const MAX_PRICE_AGE_SECS: i64 = 30;
-
-/// Maximum acceptable Pyth confidence interval as a fraction of price, in
-/// basis points. `conf / price >= 100 bps` (1%) is treated as too noisy
-/// for admission and rejects the trade.
-pub const MAX_CONF_BPS: u64 = 100;
-
-/// Decode a Pyth `PriceUpdateV2` account into a `FreshPrice`.
-///
-/// **Note:** stub. Real implementation will:
-///   1. Verify `account.owner == PYTH_RECEIVER_PROGRAM_ID` (hardcoded)
-///   2. Verify the magic / discriminator at the head of `data`
-///   3. Decode `price`, `conf`, `expo`, `publish_time` from fixed offsets
-///   4. Convert mantissa+expo to `price_e6` with saturating arithmetic
-///   5. Reject if publish_time is older than `MAX_PRICE_AGE_SECS`
-///   6. Reject if `conf_e6 / price_e6 >= MAX_CONF_BPS / 10_000`
-pub fn decode_pyth_price(_data: &[u8], _now_unix_secs: i64) -> Result<FreshPrice, PythError> {
-    Err(PythError::NotYetImplemented)
-}
-
-/// Reasons a Pyth read can fail. Each maps to a distinct wrapper-level
-/// `PortfolioError` variant when wired into Trade admission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PythError {
-    /// Account owner is not the Pyth Solana Receiver program.
-    WrongOwner,
-    /// Account data length is too short for a `PriceUpdateV2`.
-    DataTooShort,
-    /// Magic / discriminator at the head of the account does not match.
-    BadMagic,
-    /// `publish_time` is older than `MAX_PRICE_AGE_SECS`.
-    Stale,
-    /// `conf / price` exceeds `MAX_CONF_BPS`.
-    LowConfidence,
-    /// Mantissa × 10^(expo+6) overflows u64.
-    Overflow,
-    /// Decoder is a stub.
-    NotYetImplemented,
-}
