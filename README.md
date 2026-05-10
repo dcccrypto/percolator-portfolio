@@ -71,12 +71,85 @@ market_vault) at the cost of a small CU overhead.
 | 10 | `InitVault`            | user   | yes |
 | 11 | `ClosePortfolio`       | user   | yes |
 | 12 | `EnrollMarketAndInit`  | user   | yes (atomic — transfers fee, CPIs `InitUser`, registers slot) |
+| 13 | `RebalanceCrank`       | **any** | yes (Defense 3 — permissionless top-up with bounty) |
 
 Recommended setup flow: `InitPortfolio` → `InitVault` → `EnrollMarketAndInit × N`
 (transfers `fee_payment` from user_ata, signs `InitUser` as `portfolio_auth`,
 records the slot). Then `Deposit` to fund trading capital. The keeper
 rebalances collateral between enrolled markets when a per-market account
 approaches its local maintenance margin.
+
+## Cross-margin model: soft+ (Defense 1 + Defense 3)
+
+This wrapper ships "soft+ cross-margin" — engine enforces per-account
+IM/MM as the safety gate, the wrapper adds two ADDITIONAL gates that
+make the user-felt behaviour ~95% of Hyperliquid-style hard
+cross-margin. Engine API additions for true hard cross-margin (the
+ability to let an individual account run below per-market MM under
+wrapper authority) were closed by the maintainer in #58/#87/#88 and
+are out-of-scope by design.
+
+### Defense 1 — pre-trade aggregate IM check
+Every `Trade` ix verifies that `sum(equity_i) ≥ sum(im_req_i)` across
+all enrolled markets BEFORE issuing the TradeCpi. Each market's
+equity is computed via the engine's public `account_equity_maint_raw`;
+each market's IM requirement uses the engine's `try_notional` against
+a fresh-this-slot Pyth oracle decoded via the same policy
+percolator-prog applies internally (feed_id + staleness + confidence,
+all from the slab's own MarketConfig). Caller passes (slab, oracle)
+pairs for every enrolled market beyond the trade target; the wrapper
+cross-validates membership and rejects duplicates. Math is mirrored
+line-for-line from `engine.is_above_initial_margin` and Kani-proven
+to saturate conservatively on overflow.
+
+What this catches that engine-alone doesn't:
+- Portfolio insolvency where the trade target is fine individually
+  but other accounts are bleeding
+- Trades that pass per-account IM but push portfolio aggregate
+  IM headroom below zero
+
+### Defense 3 — permissionless rebalance crank
+Tag 13 `RebalanceCrank` is callable by **any** signer. Pre-check gate:
+the destination account must be BELOW its per-market initial-margin
+requirement; otherwise the crank rejects with `CrankNotNeeded`. On
+success the wrapper signs Withdraw + Deposit CPIs as `portfolio_auth`,
+then pays the caller a small bounty (min(amount / 100, 1 USDC)) from
+the portfolio vault. Recruits MEV / arbitrage bots as auxiliary
+keepers without inviting abuse — bounty is zero on dust-sized
+rebalances, self-legs are rejected, paused portfolios block the crank.
+
+### Atomic trade-with-rebalance (via client-side composition)
+
+A frequent UX want is "if my account is approaching MM at trade time,
+rebalance and trade atomically." This wrapper does NOT bundle a
+dedicated `TradeWithRebalance` ix because the account-list cost
+(adding source-market-vault + vault-authority + oracle accounts to
+every Trade) pushes typical-size transactions beyond the Solana
+account-count budget. Instead, **clients compose two instructions
+into one transaction**:
+
+```
+[ ComputeBudget |
+  portfolio::RebalanceCrank { from_idx, to_idx, amount },
+  portfolio::Trade { account_idx, lp_idx, side, size_q, limit_price_e6 }
+]
+```
+
+Both run in the same transaction → same atomicity guarantee. If the
+rebalance crank fails (e.g., dest was already above IM), the whole
+transaction reverts → the Trade doesn't go through under stale state.
+SDK helpers can synthesize this composition automatically; the
+on-chain program stays simple.
+
+### Residual gap (single-block race)
+
+The one failure mode NEITHER soft+ cross-margin NOR true hard
+cross-margin can fully close is the single-block race: oracle ticks
+adversely, no rebalance tx lands in block N, a liquidator lands a
+KeeperCrank against an account that dropped below MM in block N.
+Mitigation is operational — keep per-market MM buffers wide enough
+that intra-block oracle moves can't push accounts below MM. Same
+constraint every DeFi perp has.
 
 ## Verification
 
@@ -260,8 +333,8 @@ keys/signers internally." The recipe above is that pattern.
 
 | | |
 |---|---|
-| Hard cross-margin | Out of scope by design. `src/margin.rs` and `src/pyth.rs` document the constraint explicitly. Soft cross-margin via keeper rebalance is the canonical model; hard cross-margin would require engine API changes the maintainer has rejected. |
-| Test harness `Custom(4)` | `tests/common/integration_env.rs:332` fails on `InitMarket` setup with `Custom(4)`, blocking 5 e2e tests that would otherwise exercise the full Trade / EnrollMarketAndInit flow. Pre-existing, unrelated to recent changes. Needs a separate debugging session. |
+| Atomic `TradeWithRebalance` ix | Deferred — clients can compose `RebalanceCrank` + `Trade` into a single transaction for the same atomicity guarantee without bloating the on-chain account list. See "Atomic trade-with-rebalance" section above. |
+| Off-chain keeper bot (canonical operator) | Reference implementation not written. Watches enrolled markets, computes per-account margin against fresh oracles, submits `Rebalance` (or `RebalanceCrank` from a separate keypair to claim the bounty) when buffer breached. With `RebalanceCrank` permissionless, third parties will also crank — but the canonical operator handles the steady-state. |
 | Off-chain keeper bot | Designed, not written. Watches enrolled markets, computes portfolio health, submits `Rebalance` when buffer breached. |
 | Real program ID | Currently a placeholder. Needs `solana-keygen grind` before deployment. |
 | Conservation tests | Framework is in place (`tests/test_conservation.rs`); INV-1 is active, INV-2 through INV-6 are gated on `EnrollMarketAndInit`. |
