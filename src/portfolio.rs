@@ -401,6 +401,29 @@ pub mod instruction {
         /// permanently destroyed; subsequent ops require a fresh
         /// `InitPortfolio`.
         ClosePortfolio,
+
+        /// Tag 12. Atomic enroll: transfer fee from user_ata into the
+        /// portfolio_vault, CPI `percolator-prog::InitUser` (signed as
+        /// portfolio_auth so the engine sets `account.owner = portfolio_auth`),
+        /// then record (market, expected_idx) in `enrolled[]`.
+        ///
+        /// `expected_idx` is what the off-chain client predicts the engine
+        /// will assign as the new account's idx — typically derived from
+        /// reading the slab pre-tx. The wrapper records it without
+        /// verifying engine state (which would couple the wrapper to the
+        /// engine's binary layout). If the prediction is wrong, downstream
+        /// Deposit/Trade/Withdraw fail engine-side with the per-account
+        /// owner check; the user loses only the InitUser fee. This is a
+        /// trust-but-verify-on-use design — the consequence of being
+        /// decoupled from the engine crate per upstream maintainer
+        /// guidance.
+        ///
+        /// `fee_payment` must exceed the market's `new_account_fee`; the
+        /// engine splits it into (insurance fee) + (initial capital).
+        EnrollMarketAndInit {
+            expected_idx: u16,
+            fee_payment: u64,
+        },
     }
 
     impl Instruction {
@@ -560,6 +583,20 @@ pub mod instruction {
                     }
                     Ok(Instruction::ClosePortfolio)
                 }
+                12 => {
+                    // EnrollMarketAndInit body: u16 expected_idx | u64 fee_payment = 10 bytes.
+                    if body.len() != 2 + 8 {
+                        return Err(PortfolioError::BadInstruction.into());
+                    }
+                    let expected_idx = u16::from_le_bytes([body[0], body[1]]);
+                    let fee_payment = u64::from_le_bytes([
+                        body[2], body[3], body[4], body[5], body[6], body[7], body[8], body[9],
+                    ]);
+                    Ok(Instruction::EnrollMarketAndInit {
+                        expected_idx,
+                        fee_payment,
+                    })
+                }
                 _ => Err(PortfolioError::BadInstruction.into()),
             }
         }
@@ -660,6 +697,10 @@ pub mod processor {
             Instruction::EnrollMarket { account_idx } => {
                 enroll_market(program_id, accounts, account_idx)
             }
+            Instruction::EnrollMarketAndInit {
+                expected_idx,
+                fee_payment,
+            } => enroll_market_and_init(program_id, accounts, expected_idx, fee_payment),
             Instruction::UnenrollMarket { account_idx } => {
                 unenroll_market(program_id, accounts, account_idx)
             }
@@ -949,6 +990,171 @@ pub mod processor {
         pa.enrolled[count].last_seen_eq_e6 = 0;
         pa.enrolled[count]._pad0 = [0u8; 6];
         pa.enrolled_count = (count + 1) as u8;
+
+        Ok(())
+    }
+
+    /// EnrollMarketAndInit — atomic version of EnrollMarket. Funds the
+    /// portfolio_vault with `fee_payment` from the user's ATA, then CPIs
+    /// `percolator-prog::InitUser` signed as `portfolio_auth` so the engine
+    /// account is created with `account.owner = portfolio_auth`. Records
+    /// `(market, expected_idx)` in `enrolled[]` after the CPI succeeds.
+    ///
+    /// `expected_idx` is what the off-chain client predicts the engine
+    /// will assign. The wrapper does NOT verify the prediction — that
+    /// would require reading engine state at a known offset, which
+    /// couples the wrapper to the engine's binary layout. If the
+    /// prediction is wrong, downstream Deposit/Trade/Withdraw fail
+    /// engine-side at the per-account owner check; the user loses only
+    /// the InitUser fee.
+    ///
+    /// Account layout (10):
+    ///   0. `[signer]`            user
+    ///   1. `[writable]`          portfolio_data PDA
+    ///   2. `[]`                  portfolio_auth PDA
+    ///   3. `[writable]`          portfolio_vault token account
+    ///   4. `[writable]`          user_ata (source of fee_payment)
+    ///   5. `[writable]`          market slab
+    ///   6. `[writable]`          market_vault (engine's destination)
+    ///   7. `[]`                  spl_token_program
+    ///   8. `[]`                  clock sysvar
+    ///   9. `[]`                  percolator-prog (executable)
+    fn enroll_market_and_init(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+        expected_idx: u16,
+        fee_payment: u64,
+    ) -> ProgramResult {
+        if accounts.len() != 10 {
+            return Err(PortfolioError::BadAccountCount.into());
+        }
+        let a_user = &accounts[0];
+        let a_data = &accounts[1];
+        let a_auth = &accounts[2];
+        let a_vault = &accounts[3];
+        let a_user_ata = &accounts[4];
+        let a_slab = &accounts[5];
+        let a_market_vault = &accounts[6];
+        let a_token = &accounts[7];
+        let a_clock = &accounts[8];
+        let a_percolator_prog = &accounts[9];
+
+        // Cheap validation first.
+        if fee_payment == 0 {
+            return Err(PortfolioError::ZeroAmount.into());
+        }
+        verify_token_program(a_token)?;
+        verify_percolator_program(a_percolator_prog)?;
+
+        // Verify portfolio + auth + vault PDA chain. Returns the bumps
+        // we'll need to sign as portfolio_auth.
+        let (auth_bump, vault_bump) =
+            check_portfolio_for_cpi(program_id, a_user, a_data, a_auth)?;
+        if vault_bump == 0 {
+            return Err(PortfolioError::AccountNotInitialized.into());
+        }
+
+        // Verify portfolio_vault PDA derivation matches the stored bump.
+        let expected_vault = Pubkey::create_program_address(
+            &[PORTFOLIO_VAULT_SEED, a_user.key.as_ref(), &[vault_bump]],
+            program_id,
+        )
+        .map_err(|_| PortfolioError::BadPda)?;
+        if expected_vault != *a_vault.key {
+            return Err(PortfolioError::BadPda.into());
+        }
+
+        // Pre-flight wrapper-side checks against portfolio_data, in one
+        // borrow scope. Reject paused, capacity-full, and known
+        // (market, expected_idx) duplicates before we touch any token
+        // transfer or CPI machinery.
+        {
+            let data = a_data.try_borrow_data()?;
+            let pa: &PortfolioAccount = bytemuck::from_bytes(&data[..POOL_SIZE]);
+            if pa.paused != 0 {
+                return Err(PortfolioError::Paused.into());
+            }
+            let count = pa.enrolled_count as usize;
+            if count >= crate::constants::MAX_ENROLLED_MARKETS {
+                return Err(PortfolioError::TooManyEnrolled.into());
+            }
+            // Duplicate guard — same as state-only EnrollMarket. Walks
+            // populated prefix only; slots beyond `count` are zeroed.
+            let market_bytes = a_slab.key.to_bytes();
+            for i in 0..count {
+                if pa.enrolled[i].market == market_bytes
+                    && pa.enrolled[i].account_idx == expected_idx
+                {
+                    return Err(PortfolioError::MarketAlreadyEnrolled.into());
+                }
+            }
+        }
+
+        // Step 1: SPL transfer user_ata → portfolio_vault, signed by user.
+        // The vault must hold fee_payment before the InitUser CPI because
+        // percolator-prog::InitUser pulls from a_user_ata, and we set
+        // a_user_ata = portfolio_vault below. Vault.owner is portfolio_auth
+        // (set up at InitVault), so the engine's verify_token_account
+        // check on (vault.owner == a_user signer) passes when a_user is
+        // also portfolio_auth via invoke_signed.
+        let transfer_ix =
+            cpi_helpers::spl_token_transfer(*a_user_ata.key, *a_vault.key, *a_user.key, fee_payment);
+        invoke(
+            &transfer_ix,
+            &[
+                a_user_ata.clone(),
+                a_vault.clone(),
+                a_user.clone(),
+                a_token.clone(),
+            ],
+        )?;
+
+        // Step 2: CPI percolator-prog::InitUser, signed as portfolio_auth.
+        // Engine sets accounts[new_idx].owner = portfolio_auth (since
+        // a_user passed into the CPI is portfolio_auth). The new_idx is
+        // assigned internally by `prepare_lazy_free_head`; we trust the
+        // caller's `expected_idx` prediction without verification, per
+        // the design note above.
+        let init_ix = cpi_helpers::percolator_init_user(
+            *a_percolator_prog.key,
+            *a_auth.key,
+            *a_slab.key,
+            *a_vault.key,
+            *a_market_vault.key,
+            *a_token.key,
+            *a_clock.key,
+            fee_payment,
+        );
+        let user_seed = a_user.key.as_ref();
+        let auth_seeds: &[&[u8]] = &[PORTFOLIO_AUTH_SEED, user_seed, &[auth_bump]];
+        invoke_signed(
+            &init_ix,
+            &[
+                a_auth.clone(),
+                a_slab.clone(),
+                a_vault.clone(),
+                a_market_vault.clone(),
+                a_token.clone(),
+                a_clock.clone(),
+                a_percolator_prog.clone(),
+            ],
+            &[auth_seeds],
+        )?;
+
+        // Step 3: record (market, expected_idx). Re-borrow with write
+        // permission. Capacity + duplicate were checked pre-CPI; the
+        // CPI itself has no path to mutate pa.enrolled, so the count
+        // and slot we computed before the CPI are still valid.
+        {
+            let mut data = a_data.try_borrow_mut_data()?;
+            let pa: &mut PortfolioAccount = from_bytes_mut(&mut data[..POOL_SIZE]);
+            let count = pa.enrolled_count as usize;
+            pa.enrolled[count].market = a_slab.key.to_bytes();
+            pa.enrolled[count].account_idx = expected_idx;
+            pa.enrolled[count].last_seen_eq_e6 = 0;
+            pa.enrolled[count]._pad0 = [0u8; 6];
+            pa.enrolled_count = (count + 1) as u8;
+        }
 
         Ok(())
     }
@@ -2489,6 +2695,47 @@ pub mod proofs {
         }
         let r = Instruction::decode(&buf[..len]);
         assert!(r.is_err());
+    }
+
+    /// Strict-length proof for tag 12 (EnrollMarketAndInit): body =
+    /// 2 + 8 = 10. Total = 11.
+    #[kani::proof]
+    #[kani::unwind(70)]
+    fn decode_strict_length_tag12_enroll_and_init() {
+        let len: usize = kani::any();
+        kani::assume(len <= 64 && len >= 1 && len != 11);
+        let mut buf = [0u8; 64];
+        buf[0] = 12;
+        for i in 1..len {
+            buf[i] = kani::any();
+        }
+        let r = Instruction::decode(&buf[..len]);
+        assert!(r.is_err());
+    }
+
+    /// Round-trip proof for tag 12 (EnrollMarketAndInit).
+    #[kani::proof]
+    #[kani::unwind(70)]
+    fn encode_decode_roundtrip_enroll_and_init() {
+        let expected_idx: u16 = kani::any();
+        let fee_payment: u64 = kani::any();
+
+        let mut buf = [0u8; 32];
+        buf[0] = 12;
+        buf[1..3].copy_from_slice(&expected_idx.to_le_bytes());
+        buf[3..11].copy_from_slice(&fee_payment.to_le_bytes());
+
+        let r = Instruction::decode(&buf[..11]).expect("must decode");
+        match r {
+            Instruction::EnrollMarketAndInit {
+                expected_idx: ei,
+                fee_payment: fp,
+            } => {
+                assert!(ei == expected_idx);
+                assert!(fp == fee_payment);
+            }
+            _ => kani::cover!(false, "wrong variant"),
+        }
     }
 
     // ── Encode → decode round-trip (tag 0 InitPortfolio) ──────────────────
