@@ -29,6 +29,19 @@ declare_id!("PercoFoLPort1111111111111111111111111111111");
 // module to keep the processor readable.
 pub mod cpi;
 
+// Wrapper-side margin math (mirrors engine `account_equity_maint_raw`,
+// `notional_checked`, `is_above_*_margin`). Per upstream maintainer review
+// (#58/#87/#88): wrappers mirror engine math rather than depend on an
+// engine read-view ABI. v1 = scaffolded stubs; aggregate margin check is
+// the next major change.
+pub mod margin;
+
+// Pyth Price account decoder for fresh-oracle trade admission. Per the
+// same review: cached `engine.last_oracle_price` is NOT authoritative for
+// trade admission; admission must read a Pyth Price account this slot.
+// v1 = scaffolded stubs.
+pub mod pyth;
+
 // ─────────────────────────────────────────────────────────────────────────
 // 1. constants
 // ─────────────────────────────────────────────────────────────────────────
