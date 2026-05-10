@@ -188,6 +188,59 @@ pub fn percolator_init_user(
     }
 }
 
+/// `percolator-prog::TradeCpi` (tag 10).
+///
+/// Body: `u16 lp_idx || u16 user_idx || i128 size || u64 limit_price_e6` (28 bytes).
+///
+/// Accounts (per `~/percolator-prog/src/percolator.rs:7092`):
+///   0. `[signer]`   user (= engine.account.owner) — wrapper signs as portfolio_auth PDA
+///   1. `[]`         lp_owner (non-signer; matcher delegates auth)
+///   2. `[writable]` slab
+///   3. `[]`         clock sysvar
+///   4. `[]`         oracle
+///   5. `[]`         matcher_program
+///   6. `[writable]` matcher_context
+///   7. `[]`         lp_pda
+///   8..N            VARIADIC tail forwarded to matcher CPI verbatim
+pub fn percolator_trade_cpi(
+    program_id: Pubkey,
+    user_signer: Pubkey,
+    lp_owner: Pubkey,
+    slab: Pubkey,
+    clock_sysvar: Pubkey,
+    oracle: Pubkey,
+    matcher_program: Pubkey,
+    matcher_context: Pubkey,
+    lp_pda: Pubkey,
+    tail: &[AccountMeta],
+    lp_idx: u16,
+    user_idx: u16,
+    size: i128,
+    limit_price_e6: u64,
+) -> Instruction {
+    let mut data = vec![10u8];
+    data.extend_from_slice(&lp_idx.to_le_bytes());
+    data.extend_from_slice(&user_idx.to_le_bytes());
+    data.extend_from_slice(&size.to_le_bytes());
+    data.extend_from_slice(&limit_price_e6.to_le_bytes());
+    let mut accounts = vec![
+        AccountMeta::new_readonly(user_signer, true),
+        AccountMeta::new_readonly(lp_owner, false),
+        AccountMeta::new(slab, false),
+        AccountMeta::new_readonly(clock_sysvar, false),
+        AccountMeta::new_readonly(oracle, false),
+        AccountMeta::new_readonly(matcher_program, false),
+        AccountMeta::new(matcher_context, false),
+        AccountMeta::new_readonly(lp_pda, false),
+    ];
+    accounts.extend_from_slice(tail);
+    Instruction {
+        program_id,
+        accounts,
+        data,
+    }
+}
+
 /// SPL Token Program ID (`TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`).
 /// Hardcoded here so we don't need an spl-token import in the processor's
 /// hot paths; the wrapper only needs to verify byte equality.

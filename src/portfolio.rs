@@ -328,10 +328,20 @@ pub mod instruction {
             amount: u64,
         },
 
-        /// Tag 5. User opens / modifies a position on an enrolled market.
-        /// Validates portfolio IMR is preserved post-trade.
+        /// Tag 5. User opens / modifies a position on an enrolled market via
+        /// percolator-prog::TradeCpi. The wrapper signs as `portfolio_auth`
+        /// (the engine account's owner). LP authorization is delegated to the
+        /// matcher program at LP-registration time — the matcher CPI is what
+        /// actually authorizes the trade against the LP's inventory; the
+        /// wrapper merely forwards the matcher tail accounts unchanged.
+        ///
+        /// Per-market IM/MM is enforced engine-side. Cross-market portfolio
+        /// IM is best-effort via keeper-side `Rebalance`; the wrapper does
+        /// NOT do its own pre-trade aggregate margin check in v1 — that
+        /// requires a fresh-oracle margin port that's deferred.
         Trade {
             account_idx: u16,
+            lp_idx: u16,
             side: u8,
             size_q: u64,
             limit_price_e6: u64,
@@ -446,20 +456,24 @@ pub mod instruction {
                     Ok(Instruction::Withdraw { account_idx, amount })
                 }
                 5 => {
-                    if body.len() != 2 + 1 + 8 + 8 {
+                    // Trade body: u16 account_idx | u16 lp_idx | u8 side |
+                    //             u64 size_q | u64 limit_price_e6 = 21 bytes.
+                    if body.len() != 2 + 2 + 1 + 8 + 8 {
                         return Err(PortfolioError::BadInstruction.into());
                     }
                     let account_idx = u16::from_le_bytes([body[0], body[1]]);
-                    let side = body[2];
+                    let lp_idx = u16::from_le_bytes([body[2], body[3]]);
+                    let side = body[4];
                     let size_q = u64::from_le_bytes([
-                        body[3], body[4], body[5], body[6], body[7], body[8], body[9], body[10],
+                        body[5], body[6], body[7], body[8], body[9], body[10], body[11], body[12],
                     ]);
                     let limit_price_e6 = u64::from_le_bytes([
-                        body[11], body[12], body[13], body[14], body[15], body[16], body[17],
-                        body[18],
+                        body[13], body[14], body[15], body[16], body[17], body[18], body[19],
+                        body[20],
                     ]);
                     Ok(Instruction::Trade {
                         account_idx,
+                        lp_idx,
                         side,
                         size_q,
                         limit_price_e6,
@@ -555,11 +569,13 @@ pub mod processor {
     use crate::errors::PortfolioError;
     use crate::instruction::Instruction;
     use crate::state::PortfolioAccount;
+    use alloc::vec::Vec;
     use bytemuck::{from_bytes_mut, Zeroable};
     use solana_program::{
         account_info::AccountInfo,
         clock::Clock,
         entrypoint::ProgramResult,
+        instruction::AccountMeta,
         program::{invoke, invoke_signed},
         program_error::ProgramError,
         pubkey::Pubkey,
@@ -648,13 +664,21 @@ pub mod processor {
             Instruction::EmergencyClose { account_idx } => {
                 emergency_close(program_id, accounts, account_idx)
             }
-            // Trade is intentionally NOT wired in v1. percolator-prog's
-            // TradeNoCpi requires a co-signing LP — that's matcher-side
-            // coordination outside this program's scope. TradeCpi has
-            // different semantics worth a separate design pass. Both
-            // routes will be added once the matcher integration is
-            // designed.
-            Instruction::Trade { .. } => Err(ProgramError::InvalidInstructionData),
+            Instruction::Trade {
+                account_idx,
+                lp_idx,
+                side,
+                size_q,
+                limit_price_e6,
+            } => trade(
+                program_id,
+                accounts,
+                account_idx,
+                lp_idx,
+                side,
+                size_q,
+                limit_price_e6,
+            ),
         }
     }
 
@@ -1704,6 +1728,158 @@ pub mod processor {
         Ok(())
     }
 
+    /// Trade — user opens / modifies a position on an enrolled market via
+    /// `percolator-prog::TradeCpi`. The wrapper signs as `portfolio_auth`
+    /// (which is the engine account's owner). LP authorization is delegated
+    /// to the matcher program at LP-registration time; the runtime CPI
+    /// identity check is what binds the LP — the wrapper merely forwards
+    /// the matcher tail accounts unchanged.
+    ///
+    /// Per-market IM/MM is enforced engine-side. Cross-market portfolio
+    /// IM is best-effort via keeper `Rebalance`. The wrapper does NOT do
+    /// its own pre-trade aggregate margin check in v1.
+    ///
+    /// Accounts (12 fixed + variadic matcher tail):
+    ///   0. `[signer]`            user
+    ///   1. `[writable]`          portfolio_data PDA (read-only state check)
+    ///   2. `[]`                  portfolio_auth PDA (signs the inner CPI)
+    ///   3. `[writable]`          market slab
+    ///   4. `[]`                  clock sysvar
+    ///   5. `[]`                  oracle
+    ///   6. `[]`                  matcher_program
+    ///   7. `[writable]`          matcher_context
+    ///   8. `[]`                  lp_pda
+    ///   9. `[]`                  lp_owner (non-signer; matcher delegates auth)
+    ///  10. `[]`                  percolator-prog (executable)
+    ///  11..N                     VARIADIC matcher tail (forwarded verbatim)
+    fn trade(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+        account_idx: u16,
+        lp_idx: u16,
+        side: u8,
+        size_q: u64,
+        limit_price_e6: u64,
+    ) -> ProgramResult {
+        // Fixed-account head. Tail is anything past index 11 — passed
+        // through to the matcher CPI verbatim and never inspected here.
+        const FIXED: usize = 11;
+        if accounts.len() < FIXED {
+            return Err(PortfolioError::BadAccountCount.into());
+        }
+        let a_user = &accounts[0];
+        let a_data = &accounts[1];
+        let a_auth = &accounts[2];
+        let a_slab = &accounts[3];
+        let a_clock = &accounts[4];
+        let a_oracle = &accounts[5];
+        let a_matcher_prog = &accounts[6];
+        let a_matcher_ctx = &accounts[7];
+        let a_lp_pda = &accounts[8];
+        let a_lp_owner = &accounts[9];
+        let a_percolator_prog = &accounts[10];
+        let tail = &accounts[FIXED..];
+
+        // Surface-validation in order of cost: cheapest checks first so
+        // misuse fails before we touch borrow + CPI machinery.
+        if size_q == 0 {
+            return Err(PortfolioError::ZeroAmount.into());
+        }
+        // side: 0 = buy/long, 1 = sell/short. Reject anything else early
+        // so the caller gets a clear error rather than a silent flip.
+        if side > 1 {
+            return Err(PortfolioError::BadInstruction.into());
+        }
+        // Same-account self-trade (account_idx == lp_idx) is rejected by
+        // percolator-prog's TradeCpi anyway, but we surface a wrapper
+        // error so the failure mode is unambiguous in client logs.
+        if account_idx == lp_idx {
+            return Err(PortfolioError::BadInstruction.into());
+        }
+        verify_percolator_program(a_percolator_prog)?;
+
+        let (auth_bump, _vault_bump) =
+            check_portfolio_for_cpi(program_id, a_user, a_data, a_auth)?;
+
+        // Verify (slab, account_idx) is enrolled in this portfolio. The
+        // engine's own owner check would catch a wrong idx anyway, but
+        // surfacing PortfolioError::MarketNotEnrolled gives a clearer
+        // signal than the generic engine error and avoids the CPI cost.
+        // Also verifies paused state in the same borrow scope.
+        {
+            let data = a_data.try_borrow_data()?;
+            let pa: &PortfolioAccount = bytemuck::from_bytes(&data[..POOL_SIZE]);
+            if pa.paused != 0 {
+                return Err(PortfolioError::Paused.into());
+            }
+            if find_enrolled(pa, a_slab.key, account_idx).is_none() {
+                return Err(PortfolioError::MarketNotEnrolled.into());
+            }
+        }
+
+        // Convert (side, size_q) to signed i128 for TradeCpi:
+        //   side==0 → long  → +size_q
+        //   side==1 → short → -size_q
+        // size_q is u64, so always fits in i128 without overflow.
+        let size_signed: i128 = if side == 0 {
+            size_q as i128
+        } else {
+            -(size_q as i128)
+        };
+
+        // Build the matcher tail as AccountMeta from the AccountInfo slice.
+        // Preserve writable + signer flags from the outer transaction —
+        // TradeCpi forwards these to the matcher unchanged.
+        let mut tail_metas: Vec<AccountMeta> = Vec::with_capacity(tail.len());
+        for ai in tail.iter() {
+            tail_metas.push(if ai.is_writable {
+                AccountMeta::new(*ai.key, ai.is_signer)
+            } else {
+                AccountMeta::new_readonly(*ai.key, ai.is_signer)
+            });
+        }
+
+        let trade_ix = cpi_helpers::percolator_trade_cpi(
+            *a_percolator_prog.key,
+            *a_auth.key,
+            *a_lp_owner.key,
+            *a_slab.key,
+            *a_clock.key,
+            *a_oracle.key,
+            *a_matcher_prog.key,
+            *a_matcher_ctx.key,
+            *a_lp_pda.key,
+            &tail_metas,
+            lp_idx,
+            account_idx,
+            size_signed,
+            limit_price_e6,
+        );
+
+        // invoke_signed accounts list mirrors the AccountMeta order above:
+        // a_auth (signer-via-PDA) at slot 0, then the rest in CPI order,
+        // followed by the tail in original order.
+        let mut cpi_accounts: Vec<AccountInfo> = Vec::with_capacity(8 + tail.len() + 1);
+        cpi_accounts.push(a_auth.clone());
+        cpi_accounts.push(a_lp_owner.clone());
+        cpi_accounts.push(a_slab.clone());
+        cpi_accounts.push(a_clock.clone());
+        cpi_accounts.push(a_oracle.clone());
+        cpi_accounts.push(a_matcher_prog.clone());
+        cpi_accounts.push(a_matcher_ctx.clone());
+        cpi_accounts.push(a_lp_pda.clone());
+        for ai in tail.iter() {
+            cpi_accounts.push(ai.clone());
+        }
+        cpi_accounts.push(a_percolator_prog.clone());
+
+        let user_seed = a_user.key.as_ref();
+        let auth_seeds: &[&[u8]] = &[PORTFOLIO_AUTH_SEED, user_seed, &[auth_bump]];
+        invoke_signed(&trade_ix, &cpi_accounts, &[auth_seeds])?;
+
+        Ok(())
+    }
+
     /// EmergencyClose — user-controlled escape hatch. CPIs into
     /// `percolator-prog::CloseAccount` for a single enrolled market,
     /// transfers the released collateral back to the user's wallet, and
@@ -2196,9 +2372,9 @@ pub mod proofs {
     #[kani::proof]
     #[kani::unwind(70)]
     fn decode_strict_length_tag5_trade() {
-        // Tag 5 (Trade): body = 2 + 1 + 8 + 8 = 19. Total = 20.
+        // Tag 5 (Trade): body = 2 + 2 + 1 + 8 + 8 = 21. Total = 22.
         let len: usize = kani::any();
-        kani::assume(len <= 64 && len >= 1 && len != 20);
+        kani::assume(len <= 64 && len >= 1 && len != 22);
         let mut buf = [0u8; 64];
         buf[0] = 5;
         for i in 1..len {
@@ -2344,26 +2520,32 @@ pub mod proofs {
     #[kani::unwind(70)]
     fn encode_decode_roundtrip_trade() {
         let account_idx: u16 = kani::any();
+        let lp_idx: u16 = kani::any();
         let side: u8 = kani::any();
         let size_q: u64 = kani::any();
         let limit_price_e6: u64 = kani::any();
 
+        // Body layout: u16 account_idx | u16 lp_idx | u8 side |
+        //              u64 size_q | u64 limit_price_e6 = 21 bytes.
         let mut buf = [0u8; 64];
         buf[0] = 5;
         buf[1..3].copy_from_slice(&account_idx.to_le_bytes());
-        buf[3] = side;
-        buf[4..12].copy_from_slice(&size_q.to_le_bytes());
-        buf[12..20].copy_from_slice(&limit_price_e6.to_le_bytes());
+        buf[3..5].copy_from_slice(&lp_idx.to_le_bytes());
+        buf[5] = side;
+        buf[6..14].copy_from_slice(&size_q.to_le_bytes());
+        buf[14..22].copy_from_slice(&limit_price_e6.to_le_bytes());
 
-        let r = Instruction::decode(&buf[..20]).expect("must decode");
+        let r = Instruction::decode(&buf[..22]).expect("must decode");
         match r {
             Instruction::Trade {
                 account_idx: ai,
+                lp_idx: li,
                 side: s,
                 size_q: sz,
                 limit_price_e6: lp,
             } => {
                 assert!(ai == account_idx);
+                assert!(li == lp_idx);
                 assert!(s == side);
                 assert!(sz == size_q);
                 assert!(lp == limit_price_e6);
