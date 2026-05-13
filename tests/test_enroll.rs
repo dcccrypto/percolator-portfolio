@@ -61,6 +61,10 @@ fn unenroll_ix(
             AccountMeta::new_readonly(user.pubkey(), true),
             AccountMeta::new(data_pda, false),
             AccountMeta::new_readonly(market, false),
+            // H-6: slab account (same pubkey as market for the check that
+            // a_slab.key == a_market.key). State-only tests pass a random
+            // pubkey here — the soft-decode in the handler tolerates that.
+            AccountMeta::new_readonly(market, false),
         ],
         data,
     }

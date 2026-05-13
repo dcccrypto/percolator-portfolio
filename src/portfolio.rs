@@ -3453,25 +3453,33 @@ pub mod processor {
         if a_slab.key != a_market.key {
             return Err(PortfolioError::MarginSlabNotEnrolled.into());
         }
-        {
-            let slab_data = a_slab.try_borrow_data()?;
-            // engine_ref validates the slab header — rejects non-percolator accounts.
-            let engine = percolator_prog::zc::engine_ref(&slab_data)
-                .map_err(|_| PortfolioError::MarginSlabDecodeFailed)?;
-            let idx_usize = account_idx as usize;
-            if idx_usize < percolator::MAX_ACCOUNTS && engine.is_used(idx_usize) {
-                let account = &engine.accounts[idx_usize];
-                // All three fields must be exactly zero.
-                if account.capital.get() != 0
-                    || account.position_basis_q != 0
-                    || account.pnl != 0
-                {
-                    return Err(PortfolioError::CannotUnenrollWithBalance.into());
+        // Soft-decode: if the slab is no longer a valid percolator market
+        // (close-and-reallocate scenario, or never was a market), allow the
+        // unenroll. The user-funds-at-risk failure mode (orphaning live
+        // collateral) requires a LIVE position, which by definition needs
+        // a valid slab to exist on. A decodable slab + non-zero capital is
+        // the only state we MUST block; everything else is a stale-record
+        // cleanup the user should be able to do.
+        if let Ok(slab_data) = a_slab.try_borrow_data() {
+            if let Ok(engine) = percolator_prog::zc::engine_ref(&slab_data) {
+                let idx_usize = account_idx as usize;
+                if idx_usize < percolator::MAX_ACCOUNTS && engine.is_used(idx_usize) {
+                    let account = &engine.accounts[idx_usize];
+                    // All three fields must be exactly zero.
+                    if account.capital.get() != 0
+                        || account.position_basis_q != 0
+                        || account.pnl != 0
+                    {
+                        return Err(PortfolioError::CannotUnenrollWithBalance.into());
+                    }
                 }
+                // If idx_usize >= MAX_ACCOUNTS or !is_used: engine already
+                // freed this slot; allow unenroll (it's a stale record).
             }
-            // If idx_usize >= MAX_ACCOUNTS or !is_used: engine already freed
-            // this slot; allow unenroll (it's a stale record).
+            // If engine_ref failed: slab is no longer a percolator market.
+            // Allow unenroll — no live position can exist on a non-market slab.
         }
+        // If try_borrow_data failed (account closed entirely): also allow.
 
         let mut data = a_data.try_borrow_mut_data()?;
         let pa: &mut PortfolioAccount = from_bytes_mut(&mut data[..POOL_SIZE]);

@@ -259,6 +259,8 @@ fn cu_unenroll_market() {
             AccountMeta::new_readonly(user.pubkey(), true),
             AccountMeta::new(data_pda, false),
             AccountMeta::new_readonly(market, false),
+            // H-6: slab account (same pubkey as market — see test_enroll.rs).
+            AccountMeta::new_readonly(market, false),
         ],
         data,
     };
