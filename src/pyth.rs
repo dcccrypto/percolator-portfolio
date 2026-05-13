@@ -41,6 +41,17 @@ pub fn read_oracle_price_e6(
     slab_data: &[u8],
     now_unix_ts: i64,
 ) -> Result<u64, ProgramError> {
+    // M-2: `percolator_prog::state::read_config` silently panics if
+    // `slab_data.len() < HEADER_LEN + CONFIG_LEN` (index-out-of-bounds on
+    // the byte-copy). Reject under-length slabs explicitly with a clear
+    // wrapper error instead of an SBF fault.
+    // Constants: percolator_prog::constants::{HEADER_LEN, CONFIG_LEN}
+    // (~/percolator-prog/src/percolator.rs:69-70).
+    let min_len =
+        percolator_prog::constants::HEADER_LEN + percolator_prog::constants::CONFIG_LEN;
+    if slab_data.len() < min_len {
+        return Err(crate::errors::PortfolioError::MarginSlabDecodeFailed.into());
+    }
     let config = percolator_prog::state::read_config(slab_data);
     let (price_e6, _publish_time) = percolator_prog::oracle::read_pyth_price_e6(
         oracle_ai,

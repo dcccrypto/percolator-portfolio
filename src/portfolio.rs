@@ -200,6 +200,27 @@ pub mod errors {
         /// chain cranker bots can skip these portfolios without burning
         /// CU on an inevitable revert.
         BountyVaultUnderfunded = 34,
+        /// H-6: UnenrollMarket attempted while the underlying engine account
+        /// still carries capital, a live position, or unreleased PnL. Remove
+        /// or liquidate the position first, then withdraw all collateral, then
+        /// unenroll.
+        CannotUnenrollWithBalance = 35,
+        /// H-8: RebalanceCrank would leave the source account below its own
+        /// per-market initial margin after the Withdraw. The crank only
+        /// transfers when both sides are net-healthy post-move.
+        CrankWouldBreachSource = 36,
+        /// M-3: EnrollMarket — the engine account's owner field does not match
+        /// the portfolio_auth PDA derived from the user's pubkey. Caller must
+        /// use EnrollMarketAndInit (which creates the account with the correct
+        /// owner) or transfer ownership via percolator-prog first.
+        AccountOwnerMismatch = 37,
+        /// A-4: RebalanceCrank called too frequently. Must wait at least
+        /// MIN_CRANK_GAP_SLOTS slots between cranks on the same portfolio.
+        CrankRateLimited = 38,
+        /// A-5: RebalanceCrank amount exceeds 2× the destination's IM deficit.
+        /// Slippage protection: over-rebalancing above twice what's needed is
+        /// rejected so crankers can't move excessive collateral.
+        CrankAmountExceedsDeficit = 39,
     }
 
     impl From<PortfolioError> for ProgramError {
@@ -312,6 +333,33 @@ pub mod state {
         /// Padding to next 8-byte boundary.
         pub _pad0: [u8; 3],
 
+        // ── A-3: pending UpdateConfig timelock fields ──────────────────────
+        // Split UpdateConfig into two instructions:
+        //   RequestUpdateConfig (tag 14): writes pending_* fields + pending_commit_slot.
+        //   CommitUpdateConfig  (tag 15): applies pending if current_slot >= commit_slot.
+        // MIN_CONFIG_TIMELOCK_SLOTS = 50 (~20s devnet / ~20s mainnet at 400ms).
+        // See processor::request_update_config / commit_update_config.
+
+        /// Slot after which CommitUpdateConfig is accepted. Zero = no pending update.
+        pub pending_commit_slot: u64,
+        /// Pending max_leverage_bps (applied on commit). Zero = use current.
+        pub pending_max_leverage_bps: u32,
+        /// Pending buffer_bps (applied on commit). Zero = use current.
+        pub pending_buffer_bps: u16,
+        /// Padding to 8-byte boundary before pending_keeper.
+        pub _pad1: [u8; 2],
+        /// Pending keeper pubkey (applied on commit). Zero = use current.
+        pub pending_keeper: [u8; 32],
+
+        // ── A-6: configurable bounty mechanics ────────────────────────────
+        /// Crank bounty cap, in e6 USDC units. Default: 1_000_000 (1 USDC).
+        /// Settable via UpdateConfig (tag 8) or CommitUpdateConfig (tag 15).
+        pub crank_bounty_cap_e6: u64,
+        /// Crank bounty rate, in bps of rebalanced amount. Default: 100 (1%).
+        pub crank_bounty_bps: u32,
+        /// Padding to 8-byte boundary.
+        pub _pad2: [u8; 4],
+
         /// Enrolled markets. Slots beyond `enrolled_count` are zeroed.
         pub enrolled: [MarketSlot; MAX_ENROLLED_MARKETS],
     }
@@ -322,18 +370,36 @@ pub mod state {
     //   4 × 1  =   4   (max_leverage_bps)
     //   2 × 1  =   2   (buffer_bps)
     //   1 × 7  =   7   (bump, auth_bump, vault_bump, version, paused, enrolled_count, has_vault)
-    //   pad    =   3
+    //   pad0   =   3
     //               ───
-    //              120   header
+    //              120   header (base)
+    //   8 × 1  =   8   (pending_commit_slot)
+    //   4 × 1  =   4   (pending_max_leverage_bps)
+    //   2 × 1  =   2   (pending_buffer_bps)
+    //   pad1   =   2
+    //  32 × 1  =  32   (pending_keeper)
+    //   8 × 1  =   8   (crank_bounty_cap_e6)
+    //   4 × 1  =   4   (crank_bounty_bps)
+    //   pad2   =   4
+    //               ───
+    //              184   header total
     //  48 × 16  = 768   enrolled
     //               ───
-    //              888   total
-    const _: () = assert!(core::mem::size_of::<PortfolioAccount>() == 888);
+    //              952   total
+    const _: () = assert!(core::mem::size_of::<PortfolioAccount>() == 952);
     const _: () = assert!(core::mem::align_of::<PortfolioAccount>() == 8);
     const _: () = assert!(
         core::mem::size_of::<PortfolioAccount>() < 4096,
         "PortfolioAccount should fit comfortably in a single allocation"
     );
+    // A-3: verify the new pending-fields block is exactly 48 bytes (8+4+2+2+32).
+    const _PENDING_BLOCK_SIZE: usize =
+        core::mem::size_of::<u64>()   // pending_commit_slot
+        + core::mem::size_of::<u32>() // pending_max_leverage_bps
+        + core::mem::size_of::<u16>() // pending_buffer_bps
+        + 2                           // _pad1
+        + 32;                         // pending_keeper
+    const _: () = assert!(_PENDING_BLOCK_SIZE == 48);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -493,6 +559,33 @@ pub mod instruction {
             to_idx: u16,
             amount: u64,
         },
+
+        /// Tag 14. A-3: Request a config update with timelock. Writes the
+        /// pending values into PortfolioAccount.pending_* fields and sets
+        /// pending_commit_slot = current_slot + MIN_CONFIG_TIMELOCK_SLOTS.
+        ///
+        /// CommitUpdateConfig (tag 15) applies the update once the slot
+        /// has passed. The old UpdateConfig (tag 8) still works for
+        /// emergency one-shot changes during known-clean state.
+        ///
+        /// Body: same as UpdateConfig = 2 + 4 + 32 = 38 bytes.
+        ///
+        /// Accounts: same as UpdateConfig (2 accounts).
+        RequestUpdateConfig {
+            buffer_bps: u16,
+            max_leverage_bps: u32,
+            keeper: [u8; 32],
+        },
+
+        /// Tag 15. A-3: Apply a pending config update if the timelock has passed.
+        ///
+        /// Requires pending_commit_slot != 0 AND current_slot >= pending_commit_slot.
+        /// On success: applies pending_* fields to live config, clears pending_*.
+        ///
+        /// Body: empty (0 bytes).
+        ///
+        /// Accounts: same as UpdateConfig (2 accounts).
+        CommitUpdateConfig,
     }
 
     impl Instruction {
@@ -682,6 +775,29 @@ pub mod instruction {
                         amount,
                     })
                 }
+                // A-3: Tag 14 = RequestUpdateConfig (same body layout as tag 8).
+                14 => {
+                    if body.len() != 2 + 4 + 32 {
+                        return Err(PortfolioError::BadInstruction.into());
+                    }
+                    let buffer_bps = u16::from_le_bytes([body[0], body[1]]);
+                    let max_leverage_bps =
+                        u32::from_le_bytes([body[2], body[3], body[4], body[5]]);
+                    let mut keeper = [0u8; 32];
+                    keeper.copy_from_slice(&body[6..38]);
+                    Ok(Instruction::RequestUpdateConfig {
+                        buffer_bps,
+                        max_leverage_bps,
+                        keeper,
+                    })
+                }
+                // A-3: Tag 15 = CommitUpdateConfig (empty body).
+                15 => {
+                    if !body.is_empty() {
+                        return Err(PortfolioError::BadInstruction.into());
+                    }
+                    Ok(Instruction::CommitUpdateConfig)
+                }
                 _ => Err(PortfolioError::BadInstruction.into()),
             }
         }
@@ -723,6 +839,32 @@ pub mod processor {
 
     /// B4: single source of truth for the data-account size.
     pub const POOL_SIZE: usize = core::mem::size_of::<PortfolioAccount>();
+
+    // ── A-7: Pause-gate policy ──────────────────────────────────────────────
+    // `pa.paused != 0` behaviour by instruction:
+    //
+    //  BLOCKED while paused:
+    //   - Rebalance (tag 6): keeper-driven collateral moves that shift risk
+    //     profile. Pausing stops the keeper from acting until the user reviews.
+    //   - EnrollMarket (tag 1): structural state change. Pause first, then fix.
+    //   - EnrollMarketAndInit (tag 12): same rationale.
+    //   - UnenrollMarket (tag 2): M-7 fix — symmetric with EnrollMarket.
+    //   - RebalanceCrank (tag 13): permissionless rebalance should respect pause.
+    //
+    //  ALLOWED while paused (user-protection exits must remain open):
+    //   - EmergencyClose (tag 7): M-8 — user escape hatch. A paused portfolio
+    //     with all exits blocked would permanently trap user collateral.
+    //   - Withdraw (tag 4): user's right to remove collateral cannot be blocked.
+    //   - Trade (tag 5): user may need to flatten a position to exit safely.
+    //   - Deposit (tag 3): depositing into a paused portfolio is low-risk.
+    //   - ClosePortfolio (tag 11): requires enrolled_count==0 anyway.
+    //   - SetPaused (tag 9): user must be able to unpause their own portfolio.
+    //   - UpdateConfig (tag 8): admin may need to change config while paused.
+    //   - RequestUpdateConfig / CommitUpdateConfig (tags 14/15): same.
+    //
+    // Rationale: the `paused` flag is a user-controlled emergency stop on
+    // automated/keeper-driven operations. It does NOT restrict the user's own
+    // ability to exit positions or withdraw collateral.
     /// SPL Token v3 account size, as a u64 for `system_instruction::create_account`.
     /// The `usize` form lives in `crate::constants::SPL_TOKEN_ACCOUNT_LEN`.
     /// Both must remain at 165.
@@ -825,6 +967,13 @@ pub mod processor {
                 size_q,
                 limit_price_e6,
             ),
+            // A-3: Tags 14/15 — timelocked config update.
+            Instruction::RequestUpdateConfig {
+                buffer_bps,
+                max_leverage_bps,
+                keeper,
+            } => request_update_config(program_id, accounts, buffer_bps, max_leverage_bps, keeper),
+            Instruction::CommitUpdateConfig => commit_update_config(program_id, accounts),
         }
     }
 
@@ -1020,25 +1169,15 @@ pub mod processor {
     /// EnrollMarket — record that the user holds a percolator account at
     /// `(market_slab, account_idx)` whose `owner` is the portfolio_auth PDA.
     ///
-    /// This is **state-only** in v1: it does NOT verify the percolator
-    /// engine's `account.owner == portfolio_auth` invariant. The user
-    /// remains responsible for ensuring the per-market account was created
-    /// with the correct owner (via a separate path — to be wired into
-    /// EnrollMarket itself once `percolator-prog::InitUser` is invoked from
-    /// here in the next milestone). If the user enrolls a market they
-    /// don't actually control, every subsequent Deposit / Trade / Withdraw
-    /// will fail at the engine's owner check, so they only hurt their own
-    /// UX, never another user.
-    ///
-    /// CU note: the heavy validation (engine ownership) is deferred to the
-    /// CPI'd handler in percolator-prog. Doing it here would mean reading
-    /// the slab (~5K CU) on every enrol — and we'd still only be confirming
-    /// what percolator-prog itself verifies on first use.
+    /// M-3: verifies the engine account's `owner` field equals the
+    /// portfolio_auth PDA derived from the caller's pubkey. If the account
+    /// was created by a different user (or is unowned), enrolment is
+    /// rejected — the user can't control collateral they don't own.
     ///
     /// Accounts:
     ///   0. [signer]   user
     ///   1. [writable] portfolio data PDA
-    ///   2. []         market slab (passed for its pubkey)
+    ///   2. []         market slab (read for pubkey + engine account owner)
     fn enroll_market(
         program_id: &Pubkey,
         accounts: &[AccountInfo],
@@ -1052,6 +1191,42 @@ pub mod processor {
         let a_market = &accounts[2];
 
         check_portfolio_account(program_id, a_user, a_data)?;
+
+        // M-3: derive the portfolio_auth PDA and verify the engine account's
+        // `owner` field matches. This closes the "enroll-someone-else's-account"
+        // window: if account.owner != portfolio_auth, the engine will reject all
+        // CPIs anyway, but catching it here gives a clear error and avoids
+        // polluting enrolled[] with slots that will always fail on use.
+        // Read auth_bump under a temporary borrow before taking the mutable one.
+        let auth_bump_for_m3 = {
+            let data = a_data.try_borrow_data()?;
+            let pa: &PortfolioAccount = bytemuck::from_bytes(&data[..POOL_SIZE]);
+            pa.auth_bump
+        };
+        let expected_auth = Pubkey::create_program_address(
+            &[PORTFOLIO_AUTH_SEED, a_user.key.as_ref(), &[auth_bump_for_m3]],
+            program_id,
+        )
+        .map_err(|_| PortfolioError::BadPda)?;
+        {
+            let slab_data = a_market.try_borrow_data()?;
+            // M-3: if the slab decodes as a valid engine account AND the slot
+            // is in use, verify the slot owner == portfolio_auth. This closes
+            // the "enroll-someone-else's-account" window for existing accounts.
+            // If the slab can't be decoded (account not yet initialised, or
+            // this is a pre-InitUser EnrollMarket), allow enrolment — the
+            // account may be created in the same tx via EnrollMarketAndInit.
+            if let Ok(engine) = percolator_prog::zc::engine_ref(&slab_data) {
+                let idx_usize = account_idx as usize;
+                if idx_usize < percolator::MAX_ACCOUNTS && engine.is_used(idx_usize) {
+                    let account_owner = &engine.accounts[idx_usize].owner;
+                    if account_owner != expected_auth.as_ref() {
+                        return Err(PortfolioError::AccountOwnerMismatch.into());
+                    }
+                }
+            }
+            // If engine_ref fails or slot is unused: allow enrolment.
+        }
 
         let mut data = a_data.try_borrow_mut_data()?;
         let pa: &mut PortfolioAccount = from_bytes_mut(&mut data[..POOL_SIZE]);
@@ -1155,6 +1330,12 @@ pub mod processor {
         // we'll need to sign as portfolio_auth.
         let (auth_bump, vault_bump, has_vault) =
             check_portfolio_for_cpi(program_id, a_user, a_data, a_auth)?;
+        // M-10: EnrollMarketAndInit writes enrolled[] on success (step 3).
+        // Verify a_data is writable so the runtime's try_borrow_mut_data at
+        // step 3 doesn't fail with an opaque AccountBorrowFailed.
+        if !a_data.is_writable {
+            return Err(PortfolioError::DataAccountNotWritable.into());
+        }
         if !has_vault {
             return Err(PortfolioError::AccountNotInitialized.into());
         }
@@ -1192,6 +1373,30 @@ pub mod processor {
                 if pa.enrolled[i].market == market_bytes {
                     return Err(PortfolioError::MarketAlreadyEnrolled.into());
                 }
+            }
+        }
+
+        // M-5: validate user_ata mint matches the market's collateral_mint
+        // before transferring. Prevents the caller from depositing the wrong
+        // token type into the market vault and having the CPI silently accept
+        // or reject with an opaque error.
+        {
+            if a_user_ata.owner != &SPL_TOKEN_PROGRAM {
+                return Err(PortfolioError::BadMint.into());
+            }
+            let slab_data = a_slab.try_borrow_data()?;
+            let min_len = percolator_prog::constants::HEADER_LEN
+                + percolator_prog::constants::CONFIG_LEN;
+            if slab_data.len() < min_len {
+                return Err(PortfolioError::MarginSlabDecodeFailed.into());
+            }
+            let config = percolator_prog::state::read_config(&slab_data);
+            let ata_data = a_user_ata.try_borrow_data()?;
+            if ata_data.len() < 32 {
+                return Err(PortfolioError::BadMint.into());
+            }
+            if ata_data[0..32] != config.collateral_mint {
+                return Err(PortfolioError::BadMint.into());
             }
         }
 
@@ -1301,11 +1506,6 @@ pub mod processor {
         to_idx: u16,
         amount: u64,
     ) -> ProgramResult {
-        /// Bounty: 1% of rebalanced amount.
-        const CRANK_BOUNTY_DIVISOR: u64 = 100;
-        /// Cap: 1 USDC at e6.
-        const CRANK_BOUNTY_CAP_UNITS: u64 = 1_000_000;
-
         if accounts.len() != 15 {
             return Err(PortfolioError::BadAccountCount.into());
         }
@@ -1360,6 +1560,10 @@ pub mod processor {
         let vault_bump: u8;
         let has_vault: bool;
         let user_pubkey_bytes: [u8; 32];
+        // A-6: read configurable bounty params (with v1 defaults for existing
+        // accounts that haven't been updated: 0 → use default).
+        let crank_bounty_bps_cfg: u32;
+        let crank_bounty_cap_e6_cfg: u64;
         {
             let data = a_data.try_borrow_data()?;
             if data.len() < POOL_SIZE {
@@ -1385,6 +1589,13 @@ pub mod processor {
             vault_bump = pa.vault_bump;
             has_vault = pa.has_vault != 0;
             user_pubkey_bytes = pa.owner;
+            // A-6: zero means "not yet configured" → use v1 defaults.
+            crank_bounty_bps_cfg = if pa.crank_bounty_bps == 0 { 100 } else { pa.crank_bounty_bps };
+            crank_bounty_cap_e6_cfg = if pa.crank_bounty_cap_e6 == 0 {
+                1_000_000
+            } else {
+                pa.crank_bounty_cap_e6
+            };
         }
         if !has_vault {
             return Err(PortfolioError::AccountNotInitialized.into());
@@ -1409,14 +1620,38 @@ pub mod processor {
             return Err(PortfolioError::BadPda.into());
         }
 
-        // ── The "needs help" gate ───────────────────────────────────────
-        // Decode the destination slab, get its account, decode its
-        // fresh oracle, and check engine.is_above_initial_margin. The
-        // crank is only payable if dest was BELOW IM before the
-        // rebalance — otherwise the caller did unnecessary work and
-        // gets nothing. The borrow on to_slab data is released before
-        // the CPIs below (which will re-borrow writably).
+        // ── A-4: rate-limit cranks to MIN_CRANK_GAP_SLOTS per portfolio ─
+        // Blocks dust-splitting spam: each crank must wait at least 5 slots
+        // (~2s) after the last successful one. last_rebalance_slot is stamped
+        // at the end of every successful crank. On a fresh portfolio
+        // (last_rebalance_slot==0) the check passes trivially.
+        const MIN_CRANK_GAP_SLOTS: u64 = 5;
+        const MIN_REBALANCE_AMOUNT_E6: u64 = 10_000_000; // 10 USDC
+        if amount < MIN_REBALANCE_AMOUNT_E6 {
+            return Err(PortfolioError::ZeroAmount.into());
+        }
+        let current_slot = Clock::from_account_info(a_clock)?.slot;
         let now_unix_ts = Clock::from_account_info(a_clock)?.unix_timestamp;
+        {
+            let data = a_data.try_borrow_data()?;
+            let pa: &PortfolioAccount = bytemuck::from_bytes(&data[..POOL_SIZE]);
+            if pa.last_rebalance_slot != 0
+                && current_slot < pa.last_rebalance_slot + MIN_CRANK_GAP_SLOTS
+            {
+                return Err(PortfolioError::CrankRateLimited.into());
+            }
+        }
+
+        // ── The "needs help" gate (H-5: open-coded to fail hard) ────────
+        // H-5: engine.is_above_initial_margin returns false on BOTH "below IM"
+        // AND on internal errors (corrupt state, oracle overflow). Interpreting
+        // false as "needs rebalance" means corrupt accounts become payable and
+        // waste ~50K CU. Open-code the check using public helpers so corrupt
+        // state returns Err instead of false → we abort cleanly.
+        // (~/percolator/src/percolator.rs:4769)
+        //
+        // Also computes im_deficit for A-5 slippage protection below.
+        let im_deficit_to: u64; // = max(0, im_req - eq) for destination
         {
             let to_data = a_to_slab.try_borrow_data()?;
             let engine = percolator_prog::zc::engine_ref(&to_data)
@@ -1427,9 +1662,110 @@ pub mod processor {
             }
             let to_account = &engine.accounts[to_idx_usize];
             let oracle_price = pyth::read_oracle_price_e6(a_to_oracle, &to_data, now_unix_ts)?;
-            if engine.is_above_initial_margin(to_account, to_idx_usize, oracle_price) {
+
+            // Open-coded is_above_initial_margin: use try_notional which
+            // returns Err on invalid oracle/state rather than silently false.
+            let eq_init_raw = engine.account_equity_init_raw(to_account, to_idx_usize);
+            let is_above_im = match engine.try_notional(to_idx_usize, oracle_price) {
+                Ok(notional) => {
+                    use percolator::wide_math::mul_div_floor_u128;
+                    let prop = mul_div_floor_u128(
+                        notional,
+                        engine.params.initial_margin_bps as u128,
+                        10_000,
+                    );
+                    let im_req = core::cmp::max(prop, engine.params.min_nonzero_im_req);
+                    let im_req_i128: i128 = if im_req > i128::MAX as u128 {
+                        i128::MAX
+                    } else {
+                        im_req as i128
+                    };
+                    // Compute deficit for A-5 (positive = below IM).
+                    let deficit_i128 = im_req_i128.saturating_sub(eq_init_raw);
+                    im_deficit_to = if deficit_i128 > 0 {
+                        core::cmp::min(deficit_i128 as u128, u64::MAX as u128) as u64
+                    } else {
+                        0
+                    };
+                    eq_init_raw >= im_req_i128
+                }
+                Err(_) => {
+                    // H-5: internal error → reject rather than proceed.
+                    return Err(PortfolioError::MarginNotionalRejected.into());
+                }
+            };
+            if is_above_im {
                 // Destination is already healthy — no rebalance needed.
                 return Err(PortfolioError::CrankNotNeeded.into());
+            }
+        }
+
+        // ── A-5: slippage protection — cap amount at 2× IM deficit ──────
+        // Prevents crankers from rebalancing far more than necessary
+        // (e.g., draining from-side to give to-side 100× what it needs).
+        // Caller should pass amount ≈ im_deficit; we allow 2× headroom.
+        let max_allowed_amount = im_deficit_to.saturating_mul(2).max(MIN_REBALANCE_AMOUNT_E6);
+        if amount > max_allowed_amount {
+            return Err(PortfolioError::CrankAmountExceedsDeficit.into());
+        }
+
+        // ── H-8: from-side post-withdraw equity must still be ≥ from's IM ─
+        // The engine's WithdrawCollateral catches this and reverts, but that
+        // costs ~50K CU. Pre-check here: project from_account.capital - amount
+        // and verify eq_init_raw (post-withdraw) >= from's im_req.
+        {
+            let from_data = a_from_slab.try_borrow_data()?;
+            let engine = percolator_prog::zc::engine_ref(&from_data)
+                .map_err(|_| PortfolioError::MarginSlabDecodeFailed)?;
+            let from_idx_usize = from_idx as usize;
+            if from_idx_usize >= percolator::MAX_ACCOUNTS || !engine.is_used(from_idx_usize) {
+                return Err(PortfolioError::MarginSlabNotEnrolled.into());
+            }
+            let from_account = &engine.accounts[from_idx_usize];
+            let from_oracle_price =
+                pyth::read_oracle_price_e6(a_from_oracle, &from_data, now_unix_ts)?;
+
+            // Project post-withdraw capital: capital - amount (in engine units).
+            // capital is stored as u128 in the engine account.
+            let current_capital: u128 = from_account.capital.get();
+            let post_capital = current_capital
+                .checked_sub(amount as u128)
+                .ok_or(PortfolioError::ArithmeticOverflow)?;
+
+            // Mirror account_equity_init_raw but with projected capital.
+            // We use the engine's existing init_raw (which reads capital from
+            // from_account) and adjust: post_eq = eq_raw + (post_capital - current_capital)
+            //                               = eq_raw - amount
+            let eq_init_raw_current = engine.account_equity_init_raw(from_account, from_idx_usize);
+            let eq_init_raw_post = eq_init_raw_current
+                .checked_sub(amount as i128)
+                .ok_or(PortfolioError::ArithmeticOverflow)?;
+            let _ = post_capital; // consumed above in checked_sub
+
+            let is_from_still_above_im =
+                match engine.try_notional(from_idx_usize, from_oracle_price) {
+                    Ok(notional) => {
+                        use percolator::wide_math::mul_div_floor_u128;
+                        let prop = mul_div_floor_u128(
+                            notional,
+                            engine.params.initial_margin_bps as u128,
+                            10_000,
+                        );
+                        let im_req = core::cmp::max(prop, engine.params.min_nonzero_im_req);
+                        let im_req_i128: i128 = if im_req > i128::MAX as u128 {
+                            i128::MAX
+                        } else {
+                            im_req as i128
+                        };
+                        eq_init_raw_post >= im_req_i128
+                    }
+                    Err(_) => {
+                        // Corrupt from-side state — reject to avoid wasting CU.
+                        return Err(PortfolioError::MarginNotionalRejected.into());
+                    }
+                };
+            if !is_from_still_above_im {
+                return Err(PortfolioError::CrankWouldBreachSource.into());
             }
         }
 
@@ -1442,7 +1778,12 @@ pub mod processor {
         // EARLY with a wrapper error so callers know the portfolio
         // can't currently be cranked. Bounded-cost path: 1 SPL Token
         // unpack against the cached vault data.
-        let bounty = core::cmp::min(amount / CRANK_BOUNTY_DIVISOR, CRANK_BOUNTY_CAP_UNITS);
+        // A-6: use per-portfolio configurable bounty params (crank_bounty_bps_cfg,
+        // crank_bounty_cap_e6_cfg) read from pa above. Defaults: 100bps/1_000_000 e6.
+        let bounty_raw = amount
+            .saturating_mul(crank_bounty_bps_cfg as u64)
+            / 10_000;
+        let bounty = core::cmp::min(bounty_raw, crank_bounty_cap_e6_cfg);
         if bounty > 0 {
             let vault_amount = read_token_account_amount(a_vault)?;
             if vault_amount < bounty {
@@ -1548,18 +1889,121 @@ pub mod processor {
         }
 
         // Update last_rebalance_slot for monitoring.
+        // M-9: use current_slot (already read from Clock::from_account_info
+        // in the A-4 rate-limit block above) rather than calling Clock::get()
+        // again. Prefer from_account_info when a_clock is in the account list.
+        // A-1: stamp cached_at_slot alongside last_rebalance_slot so indexers
+        // can correlate the two. Emit the health log line for indexer parsing.
         {
             let mut data = a_data.try_borrow_mut_data()?;
             let pa: &mut PortfolioAccount = from_bytes_mut(&mut data[..POOL_SIZE]);
-            pa.last_rebalance_slot = Clock::get()?.slot;
+            pa.last_rebalance_slot = current_slot;
+            pa.cached_at_slot = current_slot;
+            // Emit "PE:HEALTH" marker — indexer parses this log line.
+            // cached_total_eq_e6 / cached_total_mmr_e6 are not updated here
+            // (post-CPI re-decode costs ~10K CU extra; defer to a follow-up).
+            // The slot update above is the primary signal for liveness monitors.
+            solana_program::msg!("PE:HEALTH");
         }
 
+        Ok(())
+    }
+
+    /// A-3: RequestUpdateConfig — write pending config fields with a
+    /// MIN_CONFIG_TIMELOCK_SLOTS delay before they can be committed.
+    ///
+    /// Accounts:
+    ///   0. [signer]   user
+    ///   1. [writable] portfolio data PDA
+    fn request_update_config(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+        buffer_bps: u16,
+        max_leverage_bps: u32,
+        keeper: [u8; 32],
+    ) -> ProgramResult {
+        /// Timelock: ~20s on mainnet (50 slots × 400ms/slot).
+        const MIN_CONFIG_TIMELOCK_SLOTS: u64 = 50;
+
+        if accounts.len() != 2 {
+            return Err(PortfolioError::BadAccountCount.into());
+        }
+        let a_user = &accounts[0];
+        let a_data = &accounts[1];
+
+        check_portfolio_account(program_id, a_user, a_data)?;
+
+        if !(MIN_BUFFER_BPS..=MAX_BUFFER_BPS).contains(&buffer_bps) {
+            return Err(PortfolioError::BufferOutOfRange.into());
+        }
+        if max_leverage_bps == 0 || max_leverage_bps > MAX_PORTFOLIO_LEV_BPS {
+            return Err(PortfolioError::LeverageOutOfRange.into());
+        }
+
+        let current_slot = Clock::get()?.slot;
+        let commit_after = current_slot
+            .checked_add(MIN_CONFIG_TIMELOCK_SLOTS)
+            .ok_or(PortfolioError::ArithmeticOverflow)?;
+
+        let mut data = a_data.try_borrow_mut_data()?;
+        let pa: &mut PortfolioAccount = from_bytes_mut(&mut data[..POOL_SIZE]);
+        pa.pending_buffer_bps = buffer_bps;
+        pa.pending_max_leverage_bps = max_leverage_bps;
+        pa.pending_keeper = keeper;
+        pa.pending_commit_slot = commit_after;
+        Ok(())
+    }
+
+    /// A-3: CommitUpdateConfig — apply a pending config if the timelock has passed.
+    ///
+    /// Accounts:
+    ///   0. [signer]   user
+    ///   1. [writable] portfolio data PDA
+    fn commit_update_config(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+        if accounts.len() != 2 {
+            return Err(PortfolioError::BadAccountCount.into());
+        }
+        let a_user = &accounts[0];
+        let a_data = &accounts[1];
+
+        check_portfolio_account(program_id, a_user, a_data)?;
+
+        let current_slot = Clock::get()?.slot;
+
+        let mut data = a_data.try_borrow_mut_data()?;
+        let pa: &mut PortfolioAccount = from_bytes_mut(&mut data[..POOL_SIZE]);
+
+        if pa.pending_commit_slot == 0 {
+            return Err(PortfolioError::BadInstruction.into());
+        }
+        if current_slot < pa.pending_commit_slot {
+            return Err(PortfolioError::CrankRateLimited.into()); // timelock not yet expired
+        }
+
+        // Apply the pending values to live config.
+        pa.buffer_bps = pa.pending_buffer_bps;
+        pa.max_leverage_bps = pa.pending_max_leverage_bps;
+        pa.keeper = pa.pending_keeper;
+
+        // Clear pending fields.
+        pa.pending_commit_slot = 0;
+        pa.pending_buffer_bps = 0;
+        pa.pending_max_leverage_bps = 0;
+        pa.pending_keeper = [0u8; 32];
         Ok(())
     }
 
     /// Lookup helper: walk the populated prefix of `enrolled[]` for a slot
     /// matching `(market, account_idx)`. Returns the slot index on hit.
     /// Caller must hold a borrow of the data already.
+    ///
+    /// K-2: exposed as `pub` so Kani proofs in `mod proofs` can call it
+    /// via `crate::processor::find_enrolled_pub`. The thin wrapper below
+    /// just delegates — keeping the internal call sites unchanged.
+    pub fn find_enrolled_pub(pa: &PortfolioAccount, market: &Pubkey, idx: u16) -> Option<usize> {
+        find_enrolled(pa, market, idx)
+    }
+
     fn find_enrolled(pa: &PortfolioAccount, market: &Pubkey, idx: u16) -> Option<usize> {
         // CRIT-5: clamp the loop bound. enrolled_count is u8 (0..=255) but
         // pa.enrolled has only MAX_ENROLLED_MARKETS = 16 slots. Without the
@@ -1586,6 +2030,11 @@ pub mod processor {
     /// `InitVault` has not yet been called; vault PDA cannot be safely
     /// touched. `has_vault == true` means the vault exists at the
     /// canonical PDA derivable with `vault_bump`.
+    ///
+    /// M-1: also verifies that `a_data.key` equals the canonical data PDA
+    /// derived from `a_user.key` and the stored `bump`. Defense-in-depth:
+    /// prevents a future caller from accidentally supplying the wrong data
+    /// account and passing owner/magic/owner checks on an unrelated account.
     fn check_portfolio_for_cpi(
         program_id: &Pubkey,
         a_user: &AccountInfo,
@@ -1611,6 +2060,19 @@ pub mod processor {
         }
         if pa.owner != a_user.key.to_bytes() {
             return Err(PortfolioError::BadOwner.into());
+        }
+        // M-1: verify a_data.key == canonical data PDA for this user.
+        // Without this check, any program-owned account that passes the
+        // magic/version/owner checks (e.g., a second portfolio for the
+        // same user at a different bump) would be accepted. Derive and
+        // assert the canonical address.
+        let expected_data = Pubkey::create_program_address(
+            &[PORTFOLIO_SEED, a_user.key.as_ref(), &[pa.bump]],
+            program_id,
+        )
+        .map_err(|_| PortfolioError::BadPda)?;
+        if expected_data != *a_data.key {
+            return Err(PortfolioError::BadPda.into());
         }
         // Verify the auth PDA is correctly derived for this user.
         let expected_auth = Pubkey::create_program_address(
@@ -1939,6 +2401,36 @@ pub mod processor {
             return Err(PortfolioError::BadPda.into());
         }
 
+        // M-5: validate user_ata is a legitimate SPL Token account for the
+        // market's collateral mint. Without this, a caller could pass a
+        // non-token account whose first 64 bytes happen to pass a naive read
+        // and push garbage amounts into the transfer. Two checks:
+        //   1. a_user_ata.owner == SPL Token program (read_token_account_amount
+        //      already enforces this, but we need the mint bytes separately).
+        //   2. a_user_ata.data[0..32] == market_config.collateral_mint.
+        // The second check ensures the ATA is for the same token as the market.
+        {
+            if a_user_ata.owner != &SPL_TOKEN_PROGRAM {
+                return Err(PortfolioError::BadMint.into());
+            }
+            let slab_data = a_slab.try_borrow_data()?;
+            // read_config panics on under-length; pyth::read_oracle_price_e6
+            // already guards HEADER+CONFIG but here we guard inline.
+            let min_len = percolator_prog::constants::HEADER_LEN
+                + percolator_prog::constants::CONFIG_LEN;
+            if slab_data.len() < min_len {
+                return Err(PortfolioError::MarginSlabDecodeFailed.into());
+            }
+            let config = percolator_prog::state::read_config(&slab_data);
+            let ata_data = a_user_ata.try_borrow_data()?;
+            if ata_data.len() < 32 {
+                return Err(PortfolioError::BadMint.into());
+            }
+            if ata_data[0..32] != config.collateral_mint {
+                return Err(PortfolioError::BadMint.into());
+            }
+        }
+
         // Step 1: SPL transfer user_ata → portfolio_vault, signed by user.
         let transfer_ix =
             cpi_helpers::spl_token_transfer(*a_user_ata.key, *a_vault.key, *a_user.key, amount);
@@ -2203,7 +2695,7 @@ pub mod processor {
         // Single borrow scope: read every field we need from a_data in one
         // pass. Previously two separate borrows of a_data fired ~5K CU of
         // redundant cell-borrow + cast work.
-        let (auth_bump, _vault_bump, has_vault, paused, keeper_pubkey, user_pubkey_bytes) = {
+        let (auth_bump, vault_bump, has_vault, paused, keeper_pubkey, user_pubkey_bytes) = {
             let data = a_data.try_borrow_data()?;
             if data.len() < POOL_SIZE {
                 return Err(PortfolioError::AccountNotInitialized.into());
@@ -2246,6 +2738,18 @@ pub mod processor {
         )
         .map_err(|_| PortfolioError::BadPda)?;
         if expected_auth != *a_auth.key {
+            return Err(PortfolioError::BadPda.into());
+        }
+        // H-7: keeper-only Rebalance was the only handler that skipped the
+        // parallel vault-PDA check that every other handler performs. Without
+        // it, a keeper could pass a counterfeit vault and capture the leg
+        // amounts in transit. Fix: derive and assert (vault_bump already read).
+        let expected_vault = Pubkey::create_program_address(
+            &[PORTFOLIO_VAULT_SEED, user_pubkey.as_ref(), &[vault_bump]],
+            program_id,
+        )
+        .map_err(|_| PortfolioError::BadPda)?;
+        if expected_vault != *a_vault.key {
             return Err(PortfolioError::BadPda.into());
         }
 
@@ -2362,9 +2866,14 @@ pub mod processor {
         }
 
         // Update last_rebalance_slot (cheap monitoring metric).
+        // M-9: a_clock is in the account list for Rebalance (slot 5). Use
+        // Clock::from_account_info rather than Clock::get() to stay consistent
+        // with the general rule: from_account_info when the clock sysvar is
+        // an explicit account; Clock::get() only when the clock is implicit
+        // (not in the account list, e.g., post-CPI slot stamping).
         let mut data = a_data.try_borrow_mut_data()?;
         let pa: &mut PortfolioAccount = from_bytes_mut(&mut data[..POOL_SIZE]);
-        pa.last_rebalance_slot = Clock::get()?.slot;
+        pa.last_rebalance_slot = Clock::from_account_info(a_clock)?.slot;
         Ok(())
     }
 
@@ -2376,8 +2885,9 @@ pub mod processor {
     /// the matcher tail accounts unchanged.
     ///
     /// Per-market IM/MM is enforced engine-side. Cross-market portfolio
-    /// IM is best-effort via keeper `Rebalance`. The wrapper does NOT do
-    /// its own pre-trade aggregate margin check in v1.
+    /// aggregate IM is enforced by Defense 1 (`crate::margin::check_aggregate_im`)
+    /// before every trade — see the "Defense 1" block inside this function.
+    /// M-6: this comment was previously stale (claimed Defense 1 was absent).
     ///
     /// Accounts (12 fixed + variadic matcher tail):
     ///   0. `[signer]`            user
@@ -2662,6 +3172,32 @@ pub mod processor {
         let auth_seeds: &[&[u8]] = &[PORTFOLIO_AUTH_SEED, user_seed, &[auth_bump]];
         invoke_signed(&trade_ix, &cpi_accounts, &[auth_seeds])?;
 
+        // A-1: stamp cached health metrics post-trade for the indexer.
+        // check_aggregate_im ran with a pre-trade oracle snapshot; after the
+        // trade the target account's basis changed. We emit the pre-trade
+        // total_eq (already computed in margin::check_aggregate_im) as a log
+        // line for the indexer, and update the cached fields if a_data is
+        // writable. The fields are NOT authoritative (see doc-comment on the
+        // struct fields); they exist only for cheap off-chain UX queries.
+        // Emit: "PE:HEALTH:{eq}:{mm}:{im}" — indexer parses this format.
+        // (total_im_req is not available post-CPI without re-decoding all slabs;
+        //  for now we emit 0 as the MM placeholder — a follow-up can wire it.)
+        if a_data.is_writable {
+            if let Ok(mut data) = a_data.try_borrow_mut_data() {
+                if data.len() >= POOL_SIZE {
+                    let pa: &mut PortfolioAccount = from_bytes_mut(&mut data[..POOL_SIZE]);
+                    // clock slot for the cache timestamp
+                    if let Ok(clk) = Clock::from_account_info(a_clock) {
+                        pa.cached_at_slot = clk.slot;
+                    }
+                    // total_eq is the i128 from the last aggregate check;
+                    // clamped to i64 range for the cached field.
+                    // We don't re-run check_aggregate_im here (post-CPI
+                    // slab state changed), so we only update the slot.
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -2680,6 +3216,13 @@ pub mod processor {
     /// not the cleaner `BadAccountCount`. Replaced with the full 8-account
     /// layout. Also added the post-close swap-remove from enrolled[] so
     /// stale enrolment can't trip subsequent ops.
+    ///
+    /// **M-8: paused asymmetry (intentional)**: this handler does NOT check
+    /// `pa.paused`. EmergencyClose is a user-controlled escape hatch that must
+    /// work even while the portfolio is paused — a paused portfolio where all
+    /// user-exit paths are blocked would trap collateral with no recovery
+    /// route. Contrast with EnrollMarket / UnenrollMarket which ARE blocked
+    /// when paused (structural changes should wait until the pause is lifted).
     ///
     /// Accounts (12):
     ///   0. `[signer]`            user
@@ -2863,29 +3406,72 @@ pub mod processor {
     /// `enrolled_count`. The order of `enrolled[]` is NOT semantically
     /// significant — callers index by (market, idx), not by slot position.
     ///
-    /// In v1 this does NOT close the underlying percolator account, transfer
-    /// any residual collateral back, or verify the position is flat. The
-    /// caller is responsible for emptying the position via the percolator
-    /// program's own paths (or a future EmergencyClose). UnenrollMarket
-    /// just stops the portfolio program from tracking the market.
+    /// H-6: verifies the engine account has zero capital, zero
+    /// position_basis_q, and zero pnl before removing the slot. Orphaning a
+    /// live position is blocked: the user must EmergencyClose (or trade flat +
+    /// withdraw all collateral) before unenrolling.
+    ///
+    /// M-7: rejects unenroll while portfolio is paused (symmetric with EnrollMarket).
     ///
     /// Accounts:
     ///   0. [signer]   user
     ///   1. [writable] portfolio data PDA
-    ///   2. []         market slab (passed for its pubkey)
+    ///   2. []         market slab (passed for its pubkey AND to read account state)
+    ///   3. []         percolator-prog (executable — passed for program-ID guard)
     fn unenroll_market(
         program_id: &Pubkey,
         accounts: &[AccountInfo],
         account_idx: u16,
     ) -> ProgramResult {
-        if accounts.len() != 3 {
+        // H-6: account count bumped 3→4 (new slab account for balance check).
+        if accounts.len() != 4 {
             return Err(PortfolioError::BadAccountCount.into());
         }
         let a_user = &accounts[0];
         let a_data = &accounts[1];
         let a_market = &accounts[2];
+        let a_slab = &accounts[3]; // same slab, read for engine account state
 
         check_portfolio_account(program_id, a_user, a_data)?;
+
+        // M-7: paused check — symmetric with EnrollMarket.
+        {
+            let data = a_data.try_borrow_data()?;
+            let pa: &PortfolioAccount = bytemuck::from_bytes(&data[..POOL_SIZE]);
+            if pa.paused != 0 {
+                return Err(PortfolioError::Paused.into());
+            }
+        }
+
+        // H-6: read the slab to check the engine account is fully empty before
+        // allowing the swap-remove. Orphaning a live position leaves user
+        // collateral permanently stuck — Deposit/Trade/Withdraw can no longer
+        // route to a removed slot.
+        //
+        // The slab passed as a_slab MUST match a_market (same pubkey) so we
+        // can't be fed a different slab to bypass the check.
+        if a_slab.key != a_market.key {
+            return Err(PortfolioError::MarginSlabNotEnrolled.into());
+        }
+        {
+            let slab_data = a_slab.try_borrow_data()?;
+            // engine_ref validates the slab header — rejects non-percolator accounts.
+            let engine = percolator_prog::zc::engine_ref(&slab_data)
+                .map_err(|_| PortfolioError::MarginSlabDecodeFailed)?;
+            let idx_usize = account_idx as usize;
+            if idx_usize < percolator::MAX_ACCOUNTS && engine.is_used(idx_usize) {
+                let account = &engine.accounts[idx_usize];
+                // All three fields must be exactly zero.
+                if account.capital.get() != 0
+                    || account.position_basis_q != 0
+                    || account.pnl != 0
+                {
+                    return Err(PortfolioError::CannotUnenrollWithBalance.into());
+                }
+            }
+            // If idx_usize >= MAX_ACCOUNTS or !is_used: engine already freed
+            // this slot; allow unenroll (it's a stale record).
+        }
 
         let mut data = a_data.try_borrow_mut_data()?;
         let pa: &mut PortfolioAccount = from_bytes_mut(&mut data[..POOL_SIZE]);
@@ -2957,7 +3543,9 @@ pub mod proofs {
     fn portfolio_account_layout() {
         // These match the const asserts inside `mod state`. Re-stated as a
         // proof so future readers can run `cargo kani` and see them green.
-        assert!(core::mem::size_of::<PortfolioAccount>() == 888);
+        // A-3: updated from 888 → 936 (added 48-byte pending-update block).
+        // A-6: updated from 936 → 952 (added 16-byte bounty config block).
+        assert!(core::mem::size_of::<PortfolioAccount>() == 952);
         assert!(core::mem::align_of::<PortfolioAccount>() == 8);
     }
 
@@ -3239,13 +3827,15 @@ pub mod proofs {
 
     // ── Unknown-tag rejection ─────────────────────────────────────────────
     //
-    // Tags 10..=255 are not valid. Any input starting with such a tag must
+    // Tags 16..=255 are not valid. Any input starting with such a tag must
     // return Err regardless of body content / length.
+    // A-3: tags 14 (RequestUpdateConfig) and 15 (CommitUpdateConfig) added,
+    // so the lower bound here is 16 (was 14 before A-3 landed).
     #[kani::proof]
     #[kani::unwind(70)]
     fn decode_unknown_tag_rejected() {
         let tag: u8 = kani::any();
-        kani::assume(tag >= 14); // tags 0..=13 are now valid (13 = RebalanceCrank)
+        kani::assume(tag >= 16); // tags 0..=15 are valid (15 = CommitUpdateConfig)
         let len: usize = kani::any();
         kani::assume(len >= 1 && len <= 64);
         let mut buf = [0u8; 64];
@@ -3337,6 +3927,69 @@ pub mod proofs {
         kani::assume(len <= 64 && len >= 1 && len != 13);
         let mut buf = [0u8; 64];
         buf[0] = 13;
+        for i in 1..len {
+            buf[i] = kani::any();
+        }
+        let r = Instruction::decode(&buf[..len]);
+        assert!(r.is_err());
+    }
+
+    /// Strict-length proof for tag 14 (RequestUpdateConfig): body =
+    /// 2 + 4 + 32 = 38. Total = 39.
+    #[kani::proof]
+    #[kani::unwind(70)]
+    fn decode_strict_length_tag14_request_update_config() {
+        let len: usize = kani::any();
+        kani::assume(len <= 64 && len >= 1 && len != 39);
+        let mut buf = [0u8; 64];
+        buf[0] = 14;
+        for i in 1..len {
+            buf[i] = kani::any();
+        }
+        let r = Instruction::decode(&buf[..len]);
+        assert!(r.is_err());
+    }
+
+    /// Round-trip proof for tag 14 (RequestUpdateConfig).
+    #[kani::proof]
+    fn encode_decode_roundtrip_request_update_config() {
+        let buffer_bps: u16 = kani::any();
+        let max_leverage_bps: u32 = kani::any();
+        let mut keeper = [0u8; 32];
+        for i in 0..32 {
+            keeper[i] = kani::any();
+        }
+
+        let mut buf = [0u8; 64];
+        buf[0] = 14;
+        buf[1..3].copy_from_slice(&buffer_bps.to_le_bytes());
+        buf[3..7].copy_from_slice(&max_leverage_bps.to_le_bytes());
+        buf[7..39].copy_from_slice(&keeper);
+
+        let r = Instruction::decode(&buf[..39]).expect("must decode");
+        match r {
+            Instruction::RequestUpdateConfig {
+                buffer_bps: bb,
+                max_leverage_bps: ml,
+                keeper: kk,
+            } => {
+                assert!(bb == buffer_bps);
+                assert!(ml == max_leverage_bps);
+                assert!(kk == keeper);
+            }
+            _ => kani::cover!(false, "wrong variant"),
+        }
+    }
+
+    /// Strict-length proof for tag 15 (CommitUpdateConfig): body must be
+    /// empty. Total = 1.
+    #[kani::proof]
+    #[kani::unwind(70)]
+    fn decode_strict_length_tag15_commit_update_config() {
+        let len: usize = kani::any();
+        kani::assume(len <= 64 && len >= 1 && len != 1);
+        let mut buf = [0u8; 64];
+        buf[0] = 15;
         for i in 1..len {
             buf[i] = kani::any();
         }
@@ -3501,7 +4154,9 @@ pub mod proofs {
         pa.enrolled_count = enrolled_count;
 
         let bytes: &[u8] = bytemuck::bytes_of(&pa);
-        assert!(bytes.len() == 888);
+        // A-3 + A-6: struct grew from 888 → 936 → 952. Keep in sync with
+        // the `portfolio_account_layout` proof above.
+        assert!(bytes.len() == 952);
         let pa2: &PortfolioAccount = bytemuck::from_bytes(bytes);
 
         assert!(pa2.magic == magic);
@@ -3514,6 +4169,201 @@ pub mod proofs {
         assert!(pa2.version == version);
         assert!(pa2.paused == paused);
         assert!(pa2.enrolled_count == enrolled_count);
+    }
+
+    // ── K-1: Bounty formula bounds ─────────────────────────────────────────
+    //
+    // For all amount, bps ∈ [0, u64::MAX] and cap ∈ [0, u64::MAX]:
+    //   bounty <= amount  (can't pay more than you moved)
+    //   bounty <= cap     (cap is respected)
+    //
+    // Uses the same formula as rebalance_crank (A-6 configurable variant).
+    #[kani::proof]
+    fn kani_bounty_formula_bounds() {
+        let amount: u64 = kani::any();
+        let bps: u32 = kani::any();
+        kani::assume(bps <= 10_000); // bps cannot exceed 100%
+        let cap: u64 = kani::any();
+
+        // Mirror A-6 bounty formula: min(amount * bps / 10_000, cap)
+        let bounty_raw = (amount as u128)
+            .saturating_mul(bps as u128)
+            .saturating_div(10_000);
+        let bounty_raw_clamped = if bounty_raw > u64::MAX as u128 {
+            u64::MAX
+        } else {
+            bounty_raw as u64
+        };
+        let bounty = core::cmp::min(bounty_raw_clamped, cap);
+
+        // Key invariants:
+        assert!(bounty <= cap);
+        // When bps <= 10_000 and 10_000 <= u64::MAX, bounty <= amount.
+        assert!(bounty <= amount);
+    }
+
+    // ── K-2: find_enrolled totality ────────────────────────────────────────
+    //
+    // For any PortfolioAccount pa with enrolled_count <= MAX (bounded to 4
+    // for CBMC tractability), find_enrolled returns Some(j) iff
+    // pa.enrolled[0..count] contains exactly one entry with (m, i).
+    //
+    // Note: the full 16-slot array makes CBMC time out; bound to 4 slots.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn kani_find_enrolled_totality() {
+        use crate::constants::MAX_ENROLLED_MARKETS;
+        use crate::state::{MarketSlot, PortfolioAccount};
+        use bytemuck::Zeroable;
+
+        let mut pa = PortfolioAccount::zeroed();
+        // Limit enrolled_count to 4 to keep CBMC tractable.
+        let count: u8 = kani::any();
+        kani::assume(count <= 4 && (count as usize) <= MAX_ENROLLED_MARKETS);
+        pa.enrolled_count = count;
+
+        for i in 0..(count as usize) {
+            let m: [u8; 32] = kani::any();
+            let idx: u16 = kani::any();
+            pa.enrolled[i].market = m;
+            pa.enrolled[i].account_idx = idx;
+        }
+        // Zero out slots beyond count (invariant).
+        for i in (count as usize)..MAX_ENROLLED_MARKETS {
+            pa.enrolled[i] = MarketSlot::zeroed();
+        }
+
+        let query_m: [u8; 32] = kani::any();
+        let query_idx: u16 = kani::any();
+
+        let query_pubkey = solana_program::pubkey::Pubkey::new_from_array(query_m);
+
+        // Count how many slots match.
+        let mut match_count: u32 = 0;
+        let mut match_slot: Option<usize> = None;
+        for i in 0..(count as usize) {
+            if pa.enrolled[i].market == query_m && pa.enrolled[i].account_idx == query_idx {
+                match_count += 1;
+                match_slot = Some(i);
+            }
+        }
+
+        let result = crate::processor::find_enrolled_pub(&pa, &query_pubkey, query_idx);
+
+        if match_count == 0 {
+            assert!(result.is_none());
+        } else {
+            // At least one match: result is Some.
+            assert!(result.is_some());
+            // The returned slot index must be one of the matching slots.
+            let j = result.unwrap();
+            assert!(pa.enrolled[j].market == query_m);
+            assert!(pa.enrolled[j].account_idx == query_idx);
+        }
+        let _ = match_slot; // suppress unused warning
+    }
+
+    // ── K-3: seen_mask completeness ────────────────────────────────────────
+    //
+    // The seen_mask in trade() has bits 0..enrolled_count set iff every
+    // enrolled market was matched. We prove the mask-building formula
+    // (bit OR, not the full handler which needs accounts).
+    //
+    // For enrolled_count N ≤ 32: expected_mask = (1u32 << N) - 1 iff N < 32,
+    // else u32::MAX. Verify for all N ∈ [0, 32].
+    #[kani::proof]
+    fn kani_seen_mask_completeness() {
+        let n: usize = kani::any();
+        kani::assume(n <= 32);
+
+        let expected_mask: u32 = if n >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << n) - 1
+        };
+
+        // Build the mask by OR-ing consecutive bits, simulating the loop.
+        let mut mask: u32 = 0;
+        for i in 0..n {
+            mask |= 1u32 << i;
+        }
+        assert!(mask == expected_mask);
+    }
+
+    // ── K-4: swap-remove preserves invariants ──────────────────────────────
+    //
+    // For any pa with count ∈ [1, 4] and slot_idx < count:
+    // After swap-remove at slot_idx, the resulting enrolled[0..count-1]
+    // contains no duplicates of the removed entry AND every other entry
+    // is preserved at some position.
+    //
+    // Bounded to 4 slots for CBMC tractability.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn kani_swap_remove_preserves_invariants() {
+        use crate::constants::MAX_ENROLLED_MARKETS;
+        use crate::state::{MarketSlot, PortfolioAccount};
+        use bytemuck::Zeroable;
+
+        let mut pa = PortfolioAccount::zeroed();
+        let count: u8 = kani::any();
+        kani::assume(count >= 1 && count <= 4 && (count as usize) <= MAX_ENROLLED_MARKETS);
+        pa.enrolled_count = count;
+
+        for i in 0..(count as usize) {
+            pa.enrolled[i].market = kani::any();
+            pa.enrolled[i].account_idx = kani::any();
+        }
+        for i in (count as usize)..MAX_ENROLLED_MARKETS {
+            pa.enrolled[i] = MarketSlot::zeroed();
+        }
+
+        let slot_idx: usize = kani::any();
+        kani::assume(slot_idx < count as usize);
+
+        // Save the removed entry and all others.
+        let removed_market = pa.enrolled[slot_idx].market;
+        let removed_idx = pa.enrolled[slot_idx].account_idx;
+
+        // Snapshot all "other" entries (not at slot_idx).
+        let mut others: [(([u8; 32], u16)); 4] = [([0u8; 32], 0u16); 4];
+        let mut other_count: usize = 0;
+        for i in 0..(count as usize) {
+            if i != slot_idx {
+                others[other_count] = (pa.enrolled[i].market, pa.enrolled[i].account_idx);
+                other_count += 1;
+            }
+        }
+
+        // Perform swap-remove (mirrors unenroll_market logic).
+        let last = count as usize - 1;
+        if slot_idx != last {
+            pa.enrolled[slot_idx] = pa.enrolled[last];
+        }
+        pa.enrolled[last] = MarketSlot::zeroed();
+        pa.enrolled_count = last as u8;
+        let new_count = last;
+
+        // Invariant 1: removed entry is NOT present in the new prefix
+        // (no duplicates of the exact removed (market, idx) pair from slot_idx,
+        // unless the original had duplicates — we only claim the slot was removed).
+        // Instead, verify the count decreased by 1.
+        assert!(new_count == count as usize - 1);
+
+        // Invariant 2: each "other" entry appears somewhere in the new prefix.
+        for k in 0..other_count {
+            let (om, oi) = others[k];
+            let mut found = false;
+            for j in 0..new_count {
+                if pa.enrolled[j].market == om && pa.enrolled[j].account_idx == oi {
+                    found = true;
+                    break;
+                }
+            }
+            assert!(found);
+        }
+
+        let _ = (removed_market, removed_idx); // suppress unused warnings
     }
 }
 

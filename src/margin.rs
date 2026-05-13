@@ -22,7 +22,7 @@
 //! ## Math (mirrors engine `is_above_initial_margin` per account)
 //!
 //! For each enrolled account `i`:
-//!   eq_i      = engine.account_equity_maint_raw(account_i)      // i128
+//!   eq_i      = engine.account_equity_init_raw(account_i, idx_i)  // i128
 //!   basis_i   = projected_basis_i.unwrap_or(account_i.position_basis_q)
 //!   notional_i = ceil(|basis_i| × oracle_price_i / POS_SCALE)   // u128
 //!   prop_i    = floor(notional_i × initial_margin_bps / 10_000) // u128
@@ -77,13 +77,17 @@ pub struct EnrolledView<'a> {
 /// would breach. On `Ok`, the caller proceeds with the TradeCpi — the
 /// engine's per-account check still runs there and may still reject.
 ///
-/// **Engine-coupling note:** the math here is line-for-line the same as
-/// `engine.is_above_initial_margin` (`~/percolator/src/percolator.rs:3868`).
-/// Drift between engine and wrapper here is the wrapper's maintenance
-/// cost — re-pin + re-test on every upstream sync wave that touches
-/// margin-relevant fields. The cost of drift is conservative-or-equal
-/// rejection (wrapper rejects, engine would have accepted), never an
-/// unsafe accept.
+/// **Engine-coupling note:** the math here mirrors
+/// `engine.is_above_initial_margin` (`~/percolator/src/percolator.rs:4769`).
+/// H-2 fix: equity is now computed via `account_equity_init_raw(account, idx)`
+/// which matches the engine's IM check (capital + clamp(pnl,max=0) +
+/// matured_haircutted_pnl − fee_debt). The old `account_equity_maint_raw`
+/// included full positive PnL, causing the wrapper to be more permissive than
+/// the engine for accounts with unreleased positive PnL. Re-pin + re-test on
+/// every upstream sync wave that touches margin-relevant fields. Drift cost is
+/// conservative-or-equal rejection (wrapper rejects, engine would have
+/// accepted), never an unsafe accept.
+///
 /// Project the post-trade basis: add a signed trade delta to the current
 /// position basis, saturating on overflow toward the matching i128 bound
 /// so wider |basis| produces conservative-or-equal notional downstream.
@@ -155,8 +159,14 @@ pub fn check_aggregate_im(views: &[EnrolledView<'_>]) -> Result<(), ProgramError
 
         let account: &Account = &engine.accounts[idx];
 
-        // ── Equity (no oracle): C + PnL − FeeDebt ─────────────────────
-        let eq = engine.account_equity_maint_raw(account);
+        // ── Equity (init): C + min(PnL,0) + matured_haircutted_pnl − FeeDebt ──
+        // H-2: use account_equity_init_raw (not maint_raw) to mirror what the
+        // engine's own is_above_initial_margin uses. maint_raw includes the
+        // FULL positive PnL; init_raw clamps it to ≤ 0 + matured_haircutted.
+        // For accounts with pnl > 0, maint > init → wrapper was accepting
+        // trades the engine would reject. Conservative-or-equal fix.
+        // (~/percolator/src/percolator.rs:4617)
+        let eq = engine.account_equity_init_raw(account, idx);
 
         // ── Notional with projected basis ─────────────────────────────
         // Saturating add via `project_basis` — overflow projects to
@@ -168,8 +178,15 @@ pub fn check_aggregate_im(views: &[EnrolledView<'_>]) -> Result<(), ProgramError
         // is documented in spec §7 and replicated here exactly:
         //   notional = ceil(|basis_q| × oracle_price / POS_SCALE)
         // We use |basis_q| directly; ADL multipliers are skipped (v1).
-        let notional: u128 = if view.oracle_price_e6 == 0 {
-            // Match engine's `try_notional` rejection on zero price.
+        let notional: u128 = if view.oracle_price_e6 == 0
+            || view.oracle_price_e6 > percolator::MAX_ORACLE_PRICE
+        {
+            // H-3: mirror engine's rejection range for oracle_price.
+            // Engine rejects price==0 OR price>MAX_ORACLE_PRICE (1e12) at
+            // notional_checked (~/percolator/src/percolator.rs:3614).
+            // Wrapper was only checking ==0; an out-of-range price above
+            // MAX inflates notional and causes a conservative-direction
+            // reject, but for the wrong reason. Align the check here.
             return Err(PortfolioError::MarginNotionalRejected.into());
         } else {
             mul_div_ceil_u128(
