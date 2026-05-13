@@ -221,6 +221,10 @@ pub mod errors {
         /// Slippage protection: over-rebalancing above twice what's needed is
         /// rejected so crankers can't move excessive collateral.
         CrankAmountExceedsDeficit = 39,
+        /// ClosePortfolio precondition: portfolio_vault still holds a non-zero
+        /// balance. Drain via Withdraw (or EmergencyClose) before closing.
+        /// Distinct from `ZeroAmount` (which means "the input amount was 0").
+        VaultNotEmpty = 40,
     }
 
     impl From<PortfolioError> for ProgramError {
@@ -282,13 +286,18 @@ pub mod state {
         /// Slot of the most recent successful Rebalance. Lets liveness
         /// monitors detect stuck keepers.
         pub last_rebalance_slot: u64,
-        /// Slot at which `cached_*` values were last refreshed.
+        /// Slot at which `cached_at_slot` was last bumped. Stamped at every
+        /// successful Rebalance / RebalanceCrank as the primary liveness
+        /// signal for off-chain monitors (alongside `last_rebalance_slot`).
         pub cached_at_slot: u64,
-        /// Cached portfolio equity (sum of per-market equity at refresh).
-        /// NOT authoritative — used only for cheap UX queries / monitoring.
-        /// In e6 USDC units, signed.
+        /// RESERVED — not currently written. Intended to hold the post-
+        /// rebalance portfolio equity (e6 USDC, signed) once upstream
+        /// `GetAccountHealth` exposes a CPI that returns engine-computed
+        /// per-account equity. Re-decoding every enrolled slab post-CPI
+        /// costs ~10K extra CU per market, so we defer until we can ask
+        /// the engine directly. Field kept to lock the on-chain layout.
         pub cached_total_eq_e6: i64,
-        /// Cached portfolio MMR. Same caveat.
+        /// RESERVED — same status as `cached_total_eq_e6`, but for MMR.
         pub cached_total_mmr_e6: i64,
 
         // ── 32-byte blocks ──────────────────────────────────────────────
@@ -435,7 +444,15 @@ pub mod instruction {
             account_idx: u16,
         },
 
-        /// Tag 2. Reverse of EnrollMarket. Returns owner authority to user.
+        /// Tag 2. Removes the (market, account_idx) slot from the
+        /// portfolio's `enrolled[]` table via swap-remove. Local-only:
+        /// does NOT CPI into percolator-prog, does NOT close the engine
+        /// account, and does NOT restore engine-side owner authority to
+        /// the user — that requires upstream `UpdateAccountOwner`, which
+        /// is not yet exposed. Engine-side, `owner` remains
+        /// `portfolio_auth` after Unenroll. Rejected if the underlying
+        /// account still carries capital, an open position, or
+        /// unreleased PnL (see `CannotUnenrollWithBalance`).
         UnenrollMarket {
             account_idx: u16,
         },
@@ -446,8 +463,13 @@ pub mod instruction {
             amount: u64,
         },
 
-        /// Tag 4. User withdraws from an enrolled market. Validates that
-        /// portfolio-level health is preserved post-withdraw.
+        /// Tag 4. User withdraws collateral from an enrolled market.
+        /// Per-market IM is enforced engine-side at the underlying
+        /// percolator-prog::WithdrawCollateral CPI. The wrapper does
+        /// NOT perform an aggregate portfolio-health check here — that
+        /// requires an upstream `GetAccountHealth` CPI which is not yet
+        /// exposed; until it lands, callers should pair Withdraw with
+        /// Rebalance / RebalanceCrank as needed.
         Withdraw {
             account_idx: u16,
             amount: u64,
@@ -460,10 +482,11 @@ pub mod instruction {
         /// actually authorizes the trade against the LP's inventory; the
         /// wrapper merely forwards the matcher tail accounts unchanged.
         ///
-        /// Per-market IM/MM is enforced engine-side. Cross-market portfolio
-        /// IM is best-effort via keeper-side `Rebalance`; the wrapper does
-        /// NOT do its own pre-trade aggregate margin check in v1 — that
-        /// requires a fresh-oracle margin port that's deferred.
+        /// Per-market IM/MM is enforced engine-side at the TradeCpi. Defense
+        /// 1 of soft+ cross-margin (`crate::margin::check_aggregate_im`) also
+        /// runs pre-trade: it iterates every enrolled market with a fresh
+        /// oracle and rejects if portfolio-aggregate equity < aggregate IM
+        /// requirement (see `AggregateImBreach`).
         Trade {
             account_idx: u16,
             lp_idx: u16,
@@ -684,6 +707,13 @@ pub mod instruction {
                         return Err(PortfolioError::BadInstruction.into());
                     }
                     let leg_count = body[0];
+                    // Zero-leg rebalance is rejected at the decoder: a
+                    // keeper could otherwise submit `[6, 0]` to bump
+                    // `last_rebalance_slot` without doing any work,
+                    // spoofing liveness on off-chain monitors.
+                    if leg_count == 0 {
+                        return Err(PortfolioError::BadInstruction.into());
+                    }
                     // Decoder-side enforcement of MAX_REBALANCE_LEGS so
                     // malformed Rebalance ix data is rejected before
                     // entering the processor (runtime path is also
@@ -2278,7 +2308,7 @@ pub mod processor {
             // accidental token forfeiture.
             let vault_amt = read_token_account_amount(a_vault)?;
             if vault_amt != 0 {
-                return Err(PortfolioError::ZeroAmount.into());
+                return Err(PortfolioError::VaultNotEmpty.into());
             }
 
             // CPI spl_token::CloseAccount, dest = user (gets the rent).

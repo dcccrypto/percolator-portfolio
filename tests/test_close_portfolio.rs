@@ -240,7 +240,7 @@ fn close_portfolio_rejects_when_vault_has_balance() {
         close_ix(program_id, user.pubkey(), data_pda, auth_pda, vault),
         &user,
     );
-    assert_custom_error(res, PortfolioError::ZeroAmount as u32);
+    assert_custom_error(res, PortfolioError::VaultNotEmpty as u32);
 }
 
 #[test]

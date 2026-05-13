@@ -361,9 +361,15 @@ fn rebalance_rejects_wrong_keeper() {
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     let (vault, _) = vault_pda(&user.pubkey(), &program_id);
     let dummies = [Pubkey::new_unique(); 5];
+    let leg_dummies = [Pubkey::new_unique(); 6];
 
-    // 0-leg rebalance: tag 6 + leg_count 0 + no leg bytes.
-    let data = vec![6u8, 0u8];
+    // 1-leg rebalance: tag 6 + leg_count 1 + 12-byte leg. Decoder now
+    // rejects leg_count == 0 to block keeper-liveness spoofing (a zero-
+    // leg rebalance would bump last_rebalance_slot without doing any
+    // work). Use a 1-leg payload so the test still reaches the keeper
+    // auth check — leg accounts are unused because WrongKeeper short-
+    // circuits before per-leg account validation runs.
+    let data = vec![6u8, 1u8, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0];
 
     let ix = Instruction {
         program_id,
@@ -375,6 +381,13 @@ fn rebalance_rejects_wrong_keeper() {
             AccountMeta::new_readonly(SPL_TOKEN, false),
             AccountMeta::new_readonly(dummies[0], false), // clock
             AccountMeta::new_readonly(PERCOLATOR_PROG, false),
+            // 6 dummy per-leg accounts (unreachable past WrongKeeper).
+            AccountMeta::new_readonly(leg_dummies[0], false),
+            AccountMeta::new_readonly(leg_dummies[1], false),
+            AccountMeta::new_readonly(leg_dummies[2], false),
+            AccountMeta::new_readonly(leg_dummies[3], false),
+            AccountMeta::new_readonly(leg_dummies[4], false),
+            AccountMeta::new_readonly(leg_dummies[5], false),
         ],
         data,
     };
@@ -405,8 +418,11 @@ fn rebalance_rejects_when_paused() {
     let (_, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     let (vault, _) = vault_pda(&user.pubkey(), &program_id);
     let dummies = [Pubkey::new_unique(); 5];
+    let leg_dummies = [Pubkey::new_unique(); 6];
 
-    let data = vec![6u8, 0u8];
+    // 1-leg payload; see `rebalance_rejects_wrong_keeper` for why
+    // leg_count == 0 is no longer accepted by the decoder.
+    let data = vec![6u8, 1u8, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0];
     let ix = Instruction {
         program_id,
         accounts: vec![
@@ -417,6 +433,12 @@ fn rebalance_rejects_when_paused() {
             AccountMeta::new_readonly(SPL_TOKEN, false),
             AccountMeta::new_readonly(dummies[0], false),
             AccountMeta::new_readonly(PERCOLATOR_PROG, false),
+            AccountMeta::new_readonly(leg_dummies[0], false),
+            AccountMeta::new_readonly(leg_dummies[1], false),
+            AccountMeta::new_readonly(leg_dummies[2], false),
+            AccountMeta::new_readonly(leg_dummies[3], false),
+            AccountMeta::new_readonly(leg_dummies[4], false),
+            AccountMeta::new_readonly(leg_dummies[5], false),
         ],
         data,
     };
