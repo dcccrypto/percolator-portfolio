@@ -129,9 +129,12 @@ fn enroll_rejects_duplicate_market_and_idx() {
 }
 
 #[test]
-fn enroll_allows_same_market_different_idx() {
-    // Two account_idx values in the same market is legitimate (e.g., the
-    // user holds both a regular position and an LP position).
+fn enroll_rejects_same_market_different_idx() {
+    // CRIT-6: enrolling the same market pubkey twice (different idx) is
+    // now rejected. Defense 1's pair-region lookup matches by market
+    // pubkey alone — supporting multi-account-same-market would require
+    // (slab, idx)-joint matching there. The product decision is to keep
+    // Defense 1 simple and forbid the configuration at enrollment.
     let (mut svm, program_id, user) = fresh_env();
     send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
@@ -139,10 +142,13 @@ fn enroll_allows_same_market_different_idx() {
     let market = Pubkey::new_unique();
     send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, market, 5), &user).unwrap();
     svm.expire_blockhash();
-    send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, market, 6), &user).unwrap();
+    // Same market, different idx → rejected with MarketAlreadyEnrolled.
+    let res = send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, market, 6), &user);
+    assert!(res.is_err(), "second enrol on same market must reject");
+    assert_custom_error(res, PortfolioError::MarketAlreadyEnrolled as u32);
 
     let pa = read_portfolio(&svm, &data_pda);
-    assert_eq!(pa.enrolled_count, 2);
+    assert_eq!(pa.enrolled_count, 1, "second enrol must not increment count");
 }
 
 #[test]

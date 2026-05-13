@@ -477,6 +477,7 @@ fn emergency_close_rejects_unenrolled_market() {
     // Patch vault_bump (offset 112) to satisfy the vault_bump != 0 guard.
     let mut acct = svm.get_account(&data_pda).unwrap();
     acct.data[112] = vbump;
+    acct.data[116] = 1; // has_vault (CRIT-3 fix)
     svm.set_account(data_pda, acct).unwrap();
 
     let dummies = [Pubkey::new_unique(); 8];
@@ -545,6 +546,7 @@ fn deposit_rejects_unenrolled_market_after_vault_init() {
     let mut acct = svm.get_account(&data_pda).unwrap();
     // vault_bump field offset = 112 (after bump=110, auth_bump=111).
     acct.data[112] = vbump;
+    acct.data[116] = 1; // has_vault (CRIT-3 fix)
     svm.set_account(data_pda, acct).unwrap();
 
     let dummies = [Pubkey::new_unique(); 7];
@@ -668,6 +670,7 @@ fn deposit_rejects_fake_percolator_program() {
     // Patch vault_bump to bypass the not-init guard.
     let mut acct = svm.get_account(&data_pda).unwrap();
     acct.data[112] = vbump;
+    acct.data[116] = 1; // has_vault (CRIT-3 fix)
     svm.set_account(data_pda, acct).unwrap();
 
     let fake_program = Pubkey::new_unique(); // NOT the canonical percolator
@@ -812,6 +815,7 @@ fn rebalance_rejects_zero_amount_leg() {
     // Patch vault_bump and pre-enrol two markets so we reach the leg loop.
     let mut acct = svm.get_account(&data_pda).unwrap();
     acct.data[112] = vbump;
+    acct.data[116] = 1; // has_vault (CRIT-3 fix)
     svm.set_account(data_pda, acct).unwrap();
 
     let m1 = Pubkey::new_unique();
@@ -870,16 +874,23 @@ fn portfolio_account_layout_has_vault_bump_at_offset_112() {
     // Sanity test that pins the layout — if this ever drifts (e.g., a
     // new field shifts vault_bump), we want to know IMMEDIATELY because
     // every Deposit/Withdraw/Rebalance handler depends on it.
+    //
+    // CRIT-3 fix: has_vault is the load-bearing "vault initialised"
+    // sentinel at offset 116. vault_bump (offset 112) is now just the
+    // canonical PDA bump and can legitimately be 0 post-InitVault for
+    // ~1/256 users.
     let (mut svm, program_id, user) = fresh_env();
     send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
 
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
     let pa = read_portfolio(&svm, &data_pda);
     assert_eq!(pa.vault_bump, 0, "vault_bump zero post-InitPortfolio");
+    assert_eq!(pa.has_vault, 0, "has_vault zero pre-InitVault");
 
-    // Verify byte-level: offset 112 is vault_bump.
+    // Verify byte-level: offset 112 is vault_bump, offset 116 is has_vault.
     let acct = svm.get_account(&data_pda).unwrap();
     assert_eq!(acct.data[112], 0, "byte at offset 112 is vault_bump (zero)");
+    assert_eq!(acct.data[116], 0, "byte at offset 116 is has_vault (zero)");
     // And bump (offset 110) and auth_bump (offset 111) are non-zero
     // (they're real find_program_address bumps which start from 255).
     assert!(acct.data[110] > 0, "bump non-zero");

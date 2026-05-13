@@ -192,6 +192,14 @@ pub mod errors {
         /// from and to slabs are the same and indices match. Self-
         /// rebalance is meaningless.
         CrankSelfLeg = 33,
+        /// CRIT-2: portfolio_vault has insufficient balance to pay the
+        /// crank bounty. Withdraw+Deposit are net-zero on the vault,
+        /// so the bounty must come from a pre-existing balance. Empty
+        /// or underfunded portfolios cannot be cranked until the user
+        /// tops up the vault. Surfaced as a distinct error so off-
+        /// chain cranker bots can skip these portfolios without burning
+        /// CU on an inevitable revert.
+        BountyVaultUnderfunded = 34,
     }
 
     impl From<PortfolioError> for ProgramError {
@@ -282,11 +290,10 @@ pub mod state {
         pub bump: u8,
         /// Bump for the `portfolio_auth` signing PDA.
         pub auth_bump: u8,
-        /// Bump for the `portfolio_vault` token account PDA. `0` means the
-        /// vault has not yet been created (call `InitVault` to do so);
-        /// non-zero means the vault exists at the canonical address. The
-        /// 0-sentinel collides with a true bump of 0 in roughly 1/256 of
-        /// users; affected users would re-init. Acceptable v1 trade-off.
+        /// Bump for the `portfolio_vault` token account PDA. Always the
+        /// real canonical bump (can legitimately be 0 for ~1/256 users).
+        /// Whether the vault has been created is tracked in
+        /// `has_vault` — DO NOT use `vault_bump == 0` as a sentinel.
         pub vault_bump: u8,
         /// Layout version.
         pub version: u8,
@@ -295,8 +302,15 @@ pub mod state {
         pub paused: u8,
         /// Number of slots populated in `enrolled` (≤ MAX_ENROLLED_MARKETS).
         pub enrolled_count: u8,
+        /// Vault-created flag. `0` = `InitVault` not yet called; `1` =
+        /// vault token account exists at the canonical PDA. Stored as a
+        /// separate byte from `vault_bump` because a legitimate canonical
+        /// bump of 0 (~1/256 users) would otherwise collide with a "not
+        /// initialised" sentinel and permanently brick those users. Fix
+        /// for CRIT-3.
+        pub has_vault: u8,
         /// Padding to next 8-byte boundary.
-        pub _pad0: [u8; 4],
+        pub _pad0: [u8; 3],
 
         /// Enrolled markets. Slots beyond `enrolled_count` are zeroed.
         pub enrolled: [MarketSlot; MAX_ENROLLED_MARKETS],
@@ -307,8 +321,8 @@ pub mod state {
     //  32 × 2  =  64   (owner, keeper)
     //   4 × 1  =   4   (max_leverage_bps)
     //   2 × 1  =   2   (buffer_bps)
-    //   1 × 6  =   6   (bump, auth_bump, vault_bump, version, paused, enrolled_count)
-    //   pad    =   4
+    //   1 × 7  =   7   (bump, auth_bump, vault_bump, version, paused, enrolled_count, has_vault)
+    //   pad    =   3
     //               ───
     //              120   header
     //  48 × 16  = 768   enrolled
@@ -1046,17 +1060,30 @@ pub mod processor {
             return Err(PortfolioError::Paused.into());
         }
 
-        let count = pa.enrolled_count as usize;
-        if count >= crate::constants::MAX_ENROLLED_MARKETS {
+        // CRIT-5: clamp to MAX_ENROLLED_MARKETS. enrolled_count is u8 so
+        // a corrupted state could carry a value > 16; without the clamp,
+        // the duplicate-check loop below would index pa.enrolled[] out of
+        // bounds → SBF panic → tx abort. The capacity check on the raw
+        // value still rejects > MAX (so a corrupt state surfaces as
+        // TooManyEnrolled instead of a panic, which is the correct
+        // user-visible behaviour).
+        if pa.enrolled_count as usize >= crate::constants::MAX_ENROLLED_MARKETS {
             return Err(PortfolioError::TooManyEnrolled.into());
         }
+        let count = (pa.enrolled_count as usize).min(crate::constants::MAX_ENROLLED_MARKETS);
 
-        // Reject duplicate enrolment of the same (market, idx) pair. Walk the
-        // populated prefix only — slots beyond `count` are guaranteed zeroed.
+        // CRIT-6: reject ANY duplicate of `market` (not just the exact
+        // (market, idx) pair). The previous behaviour permitted two
+        // enrolled accounts on the same market with different account_idx
+        // values, but Defense 1's pair-region lookup matches by market
+        // pubkey alone — so a multi-account-same-market portfolio
+        // becomes structurally un-tradable: every Trade fails with
+        // WrongMarginAccountCount. Fixing it at enrollment (here)
+        // keeps Defense 1's invariant clean and makes the failure mode
+        // unambiguous.
         let market_bytes = a_market.key.to_bytes();
         for i in 0..count {
             if pa.enrolled[i].market == market_bytes
-                && pa.enrolled[i].account_idx == account_idx
             {
                 return Err(PortfolioError::MarketAlreadyEnrolled.into());
             }
@@ -1126,9 +1153,9 @@ pub mod processor {
 
         // Verify portfolio + auth + vault PDA chain. Returns the bumps
         // we'll need to sign as portfolio_auth.
-        let (auth_bump, vault_bump) =
+        let (auth_bump, vault_bump, has_vault) =
             check_portfolio_for_cpi(program_id, a_user, a_data, a_auth)?;
-        if vault_bump == 0 {
+        if !has_vault {
             return Err(PortfolioError::AccountNotInitialized.into());
         }
 
@@ -1152,17 +1179,17 @@ pub mod processor {
             if pa.paused != 0 {
                 return Err(PortfolioError::Paused.into());
             }
-            let count = pa.enrolled_count as usize;
-            if count >= crate::constants::MAX_ENROLLED_MARKETS {
+            // CRIT-5: clamp the loop bound. See enroll_market for rationale.
+            if pa.enrolled_count as usize >= crate::constants::MAX_ENROLLED_MARKETS {
                 return Err(PortfolioError::TooManyEnrolled.into());
             }
-            // Duplicate guard — same as state-only EnrollMarket. Walks
-            // populated prefix only; slots beyond `count` are zeroed.
+            let count = (pa.enrolled_count as usize)
+                .min(crate::constants::MAX_ENROLLED_MARKETS);
+            // CRIT-6: reject ANY duplicate of `market`. Defense 1 cannot
+            // disambiguate two accounts on the same market.
             let market_bytes = a_slab.key.to_bytes();
             for i in 0..count {
-                if pa.enrolled[i].market == market_bytes
-                    && pa.enrolled[i].account_idx == expected_idx
-                {
+                if pa.enrolled[i].market == market_bytes {
                     return Err(PortfolioError::MarketAlreadyEnrolled.into());
                 }
             }
@@ -1311,6 +1338,19 @@ pub mod processor {
         if !a_caller.is_signer {
             return Err(PortfolioError::WrongSigner.into());
         }
+        // CRIT-1: portfolio_data MUST be owned by this program. Without
+        // this check, an attacker can craft a fake account whose first
+        // POOL_SIZE bytes mimic a victim's PortfolioAccount (magic,
+        // version, owner pubkey, bumps — all publicly derivable), pass
+        // the victim's real auth + vault PDAs, and drain bounty to their
+        // own ATA on every legitimate below-IM event. Bounded but
+        // unbounded over time. This check closes that path.
+        if a_data.owner != program_id {
+            return Err(PortfolioError::AccountNotInitialized.into());
+        }
+        if !a_data.is_writable {
+            return Err(PortfolioError::DataAccountNotWritable.into());
+        }
         verify_token_program(a_token)?;
         verify_percolator_program(a_percolator_prog)?;
 
@@ -1318,6 +1358,7 @@ pub mod processor {
         // and not paused.
         let auth_bump: u8;
         let vault_bump: u8;
+        let has_vault: bool;
         let user_pubkey_bytes: [u8; 32];
         {
             let data = a_data.try_borrow_data()?;
@@ -1342,9 +1383,10 @@ pub mod processor {
             }
             auth_bump = pa.auth_bump;
             vault_bump = pa.vault_bump;
+            has_vault = pa.has_vault != 0;
             user_pubkey_bytes = pa.owner;
         }
-        if vault_bump == 0 {
+        if !has_vault {
             return Err(PortfolioError::AccountNotInitialized.into());
         }
 
@@ -1388,6 +1430,41 @@ pub mod processor {
             if engine.is_above_initial_margin(to_account, to_idx_usize, oracle_price) {
                 // Destination is already healthy — no rebalance needed.
                 return Err(PortfolioError::CrankNotNeeded.into());
+            }
+        }
+
+        // CRIT-2: pre-check that the vault holds at least the bounty.
+        // Withdraw + Deposit are net-zero on the vault (move `amount`
+        // in, then `amount` out), so the bounty must be paid from the
+        // PRE-EXISTING balance. If the vault is empty (or insufficiently
+        // funded), every crank attempt would revert at the bounty
+        // transfer — wasting Withdraw+Deposit CU for nothing. Fail
+        // EARLY with a wrapper error so callers know the portfolio
+        // can't currently be cranked. Bounded-cost path: 1 SPL Token
+        // unpack against the cached vault data.
+        let bounty = core::cmp::min(amount / CRANK_BOUNTY_DIVISOR, CRANK_BOUNTY_CAP_UNITS);
+        if bounty > 0 {
+            let vault_amount = read_token_account_amount(a_vault)?;
+            if vault_amount < bounty {
+                return Err(PortfolioError::BountyVaultUnderfunded.into());
+            }
+        }
+
+        // H-1: verify the bounty destination ATA is owned by the caller.
+        // Without this, a caller can specify any USDC ATA on chain and
+        // donate the bounty to a third party — a UX hazard at best and
+        // a social-engineering / attribution vector at worst. SPL Token
+        // owner is at byte offset 32-63 in the token account layout.
+        if bounty > 0 {
+            if a_payout.owner != &SPL_TOKEN_PROGRAM {
+                return Err(PortfolioError::BadVault.into());
+            }
+            let payout_data = a_payout.try_borrow_data()?;
+            if payout_data.len() < 72 {
+                return Err(PortfolioError::BadVault.into());
+            }
+            if &payout_data[32..64] != a_caller.key.as_ref() {
+                return Err(PortfolioError::WrongSigner.into());
             }
         }
 
@@ -1449,10 +1526,8 @@ pub mod processor {
         )?;
 
         // ── Pay the caller bounty from portfolio_vault ─────────────────
-        // Capped at min(amount / divisor, cap). Saturating divide
-        // handles small `amount` cleanly (yields 0 → no bounty for
-        // dust-sized cranks). Bounty signer is portfolio_auth via PDA.
-        let bounty = core::cmp::min(amount / CRANK_BOUNTY_DIVISOR, CRANK_BOUNTY_CAP_UNITS);
+        // `bounty` was computed and validated above (CRIT-2 + H-1
+        // pre-checks). Bounty signer is portfolio_auth via PDA.
         if bounty > 0 {
             let bounty_ix = cpi_helpers::spl_token_transfer(
                 *a_vault.key,
@@ -1486,7 +1561,14 @@ pub mod processor {
     /// matching `(market, account_idx)`. Returns the slot index on hit.
     /// Caller must hold a borrow of the data already.
     fn find_enrolled(pa: &PortfolioAccount, market: &Pubkey, idx: u16) -> Option<usize> {
-        let count = pa.enrolled_count as usize;
+        // CRIT-5: clamp the loop bound. enrolled_count is u8 (0..=255) but
+        // pa.enrolled has only MAX_ENROLLED_MARKETS = 16 slots. Without the
+        // clamp, a corrupted enrolled_count would cause out-of-bounds
+        // indexing and an SBF panic — recoverable DOS, not fund loss, but
+        // still a correctness gap. find_enrolled is the hottest helper;
+        // every Trade / Rebalance / Crank goes through here.
+        let count = (pa.enrolled_count as usize)
+            .min(crate::constants::MAX_ENROLLED_MARKETS);
         let market_bytes = market.to_bytes();
         for i in 0..count {
             if pa.enrolled[i].market == market_bytes && pa.enrolled[i].account_idx == idx {
@@ -1499,14 +1581,17 @@ pub mod processor {
     /// Verify that `a_data` is a valid portfolio account for `a_user`. Same
     /// chain as `check_portfolio_account` but DOES NOT require write
     /// permission — used by handlers that only need to *read* portfolio
-    /// state before doing CPIs that mutate other accounts. Returns the
-    /// `auth_bump` so callers can sign as `portfolio_auth`.
+    /// state before doing CPIs that mutate other accounts. Returns
+    /// `(auth_bump, vault_bump, has_vault)`. `has_vault == false` means
+    /// `InitVault` has not yet been called; vault PDA cannot be safely
+    /// touched. `has_vault == true` means the vault exists at the
+    /// canonical PDA derivable with `vault_bump`.
     fn check_portfolio_for_cpi(
         program_id: &Pubkey,
         a_user: &AccountInfo,
         a_data: &AccountInfo,
         a_auth: &AccountInfo,
-    ) -> Result<(u8, u8), ProgramError> {
+    ) -> Result<(u8, u8, bool), ProgramError> {
         if !a_user.is_signer {
             return Err(PortfolioError::WrongSigner.into());
         }
@@ -1536,7 +1621,7 @@ pub mod processor {
         if expected_auth != *a_auth.key {
             return Err(PortfolioError::BadPda.into());
         }
-        Ok((pa.auth_bump, pa.vault_bump))
+        Ok((pa.auth_bump, pa.vault_bump, pa.has_vault != 0))
     }
 
     /// InitVault — allocate the per-user `portfolio_vault` token account.
@@ -1582,8 +1667,10 @@ pub mod processor {
         let pa_auth_bump = {
             let data = a_data.try_borrow_data()?;
             let pa: &PortfolioAccount = bytemuck::from_bytes(&data[..POOL_SIZE]);
-            // Reject if vault is already initialised (vault_bump != 0).
-            if pa.vault_bump != 0 {
+            // Reject if vault is already initialised. Uses has_vault
+            // (not vault_bump) because a legitimate canonical bump of 0
+            // collides with the "not initialised" sentinel (CRIT-3 fix).
+            if pa.has_vault != 0 {
                 return Err(PortfolioError::AccountAlreadyInitialized.into());
             }
             pa.auth_bump
@@ -1639,10 +1726,14 @@ pub mod processor {
             &[a_vault.clone(), a_mint.clone(), a_token.clone()],
         )?;
 
-        // Persist the bump.
+        // Persist the bump and flip the has_vault flag. Both must be
+        // written together — has_vault is the "vault exists" sentinel
+        // (CRIT-3 fix), vault_bump is the canonical PDA bump (can
+        // legitimately be 0).
         let mut data = a_data.try_borrow_mut_data()?;
         let pa: &mut PortfolioAccount = from_bytes_mut(&mut data[..POOL_SIZE]);
         pa.vault_bump = vault_bump;
+        pa.has_vault = 1;
         Ok(())
     }
 
@@ -1684,7 +1775,7 @@ pub mod processor {
         let a_vault = &accounts[3];
         let a_token = &accounts[4];
 
-        let (auth_bump, vault_bump) =
+        let (auth_bump, vault_bump, has_vault) =
             check_portfolio_for_cpi(program_id, a_user, a_data, a_auth)?;
         if !a_data.is_writable {
             return Err(PortfolioError::DataAccountNotWritable.into());
@@ -1708,9 +1799,9 @@ pub mod processor {
         }
 
         // If a vault was created, it must be empty and we must close it.
-        // If never created (vault_bump == 0), there's nothing to close
+        // If never created (has_vault == false), there's nothing to close
         // on the SPL side — only the data PDA gets reclaimed.
-        if vault_bump != 0 {
+        if has_vault {
             // Vault PDA derivation must match.
             let expected_vault = Pubkey::create_program_address(
                 &[PORTFOLIO_VAULT_SEED, a_user.key.as_ref(), &[vault_bump]],
@@ -1819,9 +1910,9 @@ pub mod processor {
             return Err(PortfolioError::ZeroAmount.into());
         }
 
-        let (auth_bump, vault_bump) =
+        let (auth_bump, vault_bump, has_vault) =
             check_portfolio_for_cpi(program_id, a_user, a_data, a_auth)?;
-        if vault_bump == 0 {
+        if !has_vault {
             return Err(PortfolioError::AccountNotInitialized.into());
         }
         verify_token_program(a_token)?;
@@ -1944,11 +2035,11 @@ pub mod processor {
             return Err(PortfolioError::ZeroAmount.into());
         }
 
-        let (auth_bump, vault_bump) =
+        let (auth_bump, vault_bump, has_vault) =
             check_portfolio_for_cpi(program_id, a_user, a_data, a_auth)?;
-        // Paused check fires BEFORE vault_bump so a paused-but-vault-uninit'd
-        // portfolio reports `Paused` (the more actionable error) instead of
-        // `AccountNotInitialized`.
+        // Paused check fires BEFORE the has-vault gate so a paused-but-
+        // vault-uninit'd portfolio reports `Paused` (the more actionable
+        // error) instead of `AccountNotInitialized`.
         {
             let data = a_data.try_borrow_data()?;
             let pa: &PortfolioAccount = bytemuck::from_bytes(&data[..POOL_SIZE]);
@@ -1956,7 +2047,7 @@ pub mod processor {
                 return Err(PortfolioError::Paused.into());
             }
         }
-        if vault_bump == 0 {
+        if !has_vault {
             return Err(PortfolioError::AccountNotInitialized.into());
         }
         verify_token_program(a_token)?;
@@ -2112,7 +2203,7 @@ pub mod processor {
         // Single borrow scope: read every field we need from a_data in one
         // pass. Previously two separate borrows of a_data fired ~5K CU of
         // redundant cell-borrow + cast work.
-        let (auth_bump, vault_bump, paused, keeper_pubkey, user_pubkey_bytes) = {
+        let (auth_bump, _vault_bump, has_vault, paused, keeper_pubkey, user_pubkey_bytes) = {
             let data = a_data.try_borrow_data()?;
             if data.len() < POOL_SIZE {
                 return Err(PortfolioError::AccountNotInitialized.into());
@@ -2124,9 +2215,16 @@ pub mod processor {
             if pa.version != VERSION {
                 return Err(PortfolioError::BadVersion.into());
             }
-            (pa.auth_bump, pa.vault_bump, pa.paused, pa.keeper, pa.owner)
+            (
+                pa.auth_bump,
+                pa.vault_bump,
+                pa.has_vault != 0,
+                pa.paused,
+                pa.keeper,
+                pa.owner,
+            )
         };
-        // Order: keeper auth → paused → vault_bump. Keeper is the access
+        // Order: keeper auth → paused → has_vault. Keeper is the access
         // control gate; reporting `WrongKeeper` to a non-keeper caller is
         // the most actionable error. Then paused, then vault setup.
         if keeper_pubkey != a_keeper.key.to_bytes() {
@@ -2135,7 +2233,7 @@ pub mod processor {
         if paused != 0 {
             return Err(PortfolioError::Paused.into());
         }
-        if vault_bump == 0 {
+        if !has_vault {
             return Err(PortfolioError::AccountNotInitialized.into());
         }
 
@@ -2346,7 +2444,7 @@ pub mod processor {
         }
         verify_percolator_program(a_percolator_prog)?;
 
-        let (auth_bump, _vault_bump) =
+        let (auth_bump, _vault_bump, _has_vault) =
             check_portfolio_for_cpi(program_id, a_user, a_data, a_auth)?;
 
         // Read enrolled markets in a single borrow scope; collect the
@@ -2363,7 +2461,9 @@ pub mod processor {
             if find_enrolled(pa, a_slab.key, account_idx).is_none() {
                 return Err(PortfolioError::MarketNotEnrolled.into());
             }
-            enrolled_count = pa.enrolled_count as usize;
+            // CRIT-5: clamp loop bound. See find_enrolled for rationale.
+            enrolled_count = (pa.enrolled_count as usize)
+                .min(crate::constants::MAX_ENROLLED_MARKETS);
             let mut pairs = alloc::vec::Vec::with_capacity(enrolled_count);
             for i in 0..enrolled_count {
                 pairs.push((pa.enrolled[i].market, pa.enrolled[i].account_idx));
@@ -2615,9 +2715,9 @@ pub mod processor {
         let a_clock = &accounts[10];
         let a_percolator_prog = &accounts[11];
 
-        let (auth_bump, vault_bump) =
+        let (auth_bump, vault_bump, has_vault) =
             check_portfolio_for_cpi(program_id, a_user, a_data, a_auth)?;
-        if vault_bump == 0 {
+        if !has_vault {
             return Err(PortfolioError::AccountNotInitialized.into());
         }
         if !a_data.is_writable {
@@ -2682,8 +2782,15 @@ pub mod processor {
         )?;
 
         // Step 2: forward the delta (released collateral) to user_ata.
+        // CRIT-7: use checked_sub. The previous saturating_sub silently
+        // returned 0 if vault_after < vault_before — which would cause
+        // the user's collateral to be left in the vault while the
+        // position is fully unenrolled. Surface the inconsistency as
+        // ArithmeticOverflow so off-chain clients can detect it.
         let vault_after = read_token_account_amount(a_vault)?;
-        let released = vault_after.saturating_sub(vault_before);
+        let released = vault_after
+            .checked_sub(vault_before)
+            .ok_or(PortfolioError::ArithmeticOverflow)?;
         if released > 0 {
             let xfer_ix = cpi_helpers::spl_token_transfer(
                 *a_vault.key,
@@ -2706,7 +2813,13 @@ pub mod processor {
         // Step 3: swap-remove the now-closed slot from enrolled[].
         let mut data = a_data.try_borrow_mut_data()?;
         let pa: &mut PortfolioAccount = from_bytes_mut(&mut data[..POOL_SIZE]);
-        let count = pa.enrolled_count as usize;
+        // CRIT-5: clamp before using as index. slot_idx was already
+        // verified < count by the earlier find_enrolled call.
+        let count = (pa.enrolled_count as usize)
+            .min(crate::constants::MAX_ENROLLED_MARKETS);
+        if count == 0 {
+            return Err(PortfolioError::MarketNotEnrolled.into());
+        }
         let last = count - 1;
         if slot_idx != last {
             pa.enrolled[slot_idx] = pa.enrolled[last];
@@ -2722,9 +2835,18 @@ pub mod processor {
 
     /// Read the `amount` field of an SPL Token v3 account directly from
     /// raw account data. Layout: `mint(32) || owner(32) || amount(u64 LE) || ...`.
-    /// Returns 0 if the data is too short (defensive — callers verify the
-    /// account is a real token account elsewhere).
+    ///
+    /// H-4: verifies the account is owned by the SPL Token program before
+    /// reading bytes at the token-layout offset. The previous version
+    /// accepted any 72+ byte account, silently reading attacker-supplied
+    /// bytes as a balance (callers used the value in vault-empty checks,
+    /// release-collateral calcs, etc.). With the owner check, a wrong-
+    /// program account fails fast with a clear wrapper error instead of
+    /// reading garbage.
     fn read_token_account_amount(a: &AccountInfo) -> Result<u64, ProgramError> {
+        if a.owner != &SPL_TOKEN_PROGRAM {
+            return Err(PortfolioError::BadVault.into());
+        }
         let data = a.try_borrow_data()?;
         if data.len() < 72 {
             return Err(PortfolioError::BadVault.into());
@@ -2768,7 +2890,9 @@ pub mod processor {
         let mut data = a_data.try_borrow_mut_data()?;
         let pa: &mut PortfolioAccount = from_bytes_mut(&mut data[..POOL_SIZE]);
 
-        let count = pa.enrolled_count as usize;
+        // CRIT-5: clamp loop bound.
+        let count = (pa.enrolled_count as usize)
+            .min(crate::constants::MAX_ENROLLED_MARKETS);
         if count == 0 {
             return Err(PortfolioError::MarketNotEnrolled.into());
         }
@@ -2858,13 +2982,13 @@ pub mod proofs {
         assert!(pa.buffer_bps == 0);
         assert!(pa.bump == 0);
         assert!(pa.auth_bump == 0);
-        // vault_bump == 0 is the load-bearing sentinel for "vault not yet
-        // created" — every vault-using handler checks `vault_bump != 0`
-        // to refuse operating on an uninitialised vault. The Pod::zeroed()
-        // contract guarantees this byte is 0, but assert it explicitly so
-        // the invariant is locked in the proof, not just structurally
-        // implied.
         assert!(pa.vault_bump == 0);
+        // has_vault == 0 is the load-bearing sentinel for "vault not yet
+        // created" (CRIT-3 fix: separated from vault_bump because a
+        // legitimate canonical bump of 0 is reachable for ~1/256 users).
+        // Every vault-using handler checks `has_vault != 0` to refuse
+        // operating on an uninitialised vault.
+        assert!(pa.has_vault == 0);
         assert!(pa.version == 0);
         assert!(pa.paused == 0);
         assert!(pa.enrolled_count == 0);

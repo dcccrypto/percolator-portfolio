@@ -70,7 +70,7 @@ pub const TEST_FEED_ID: [u8; 32] = [0xABu8; 32];
 /// Re-verify on every upstream sync wave: read the
 /// `sol_log_64(SLAB_LEN, data.len(), …)` from a failed InitMarket;
 /// the first hex value (SLAB_LEN) is the new size.
-pub const SLAB_LEN: usize = 96_784;
+pub const SLAB_LEN: usize = 111_504;
 
 /// Token v3 Account size.
 pub const TOKEN_ACCOUNT_LEN: usize = 165;
