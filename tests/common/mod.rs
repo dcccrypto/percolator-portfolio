@@ -23,13 +23,44 @@
 pub mod integration_env;
 
 use litesvm::{types::FailedTransactionMetadata, LiteSVM};
+use percolator_portfolio::cpi as cpi_helpers;
 use solana_sdk::{
+    account::Account,
     instruction::{AccountMeta, Instruction, InstructionError},
     pubkey::Pubkey,
     signature::{Keypair, Signer},
     system_program,
     transaction::{Transaction, TransactionError},
 };
+
+/// Canonical percolator program ID. Used by `percolator_owned_slab` to
+/// allocate a placeholder slab account whose `owner` matches the wrapper's
+/// `verify_percolator_slab` guard. Tests that exercise wrapper-only paths
+/// (enroll, trade, rebalance_crank, etc.) without a real engine slab must
+/// allocate the slab via this helper so the owner check fires correctly
+/// before any soft-decode branch.
+pub const PERCOLATOR_PROG: Pubkey = Pubkey::new_from_array(cpi_helpers::PERCOLATOR_PROGRAM_ID);
+
+/// Allocate a placeholder slab account at `slab` whose `owner` is the
+/// canonical percolator program. Used by wrapper-only tests that just need
+/// the slab address to satisfy `verify_percolator_slab` without setting up
+/// a fully-encoded engine slab. The data is zero-length so any subsequent
+/// `engine_ref` / `read_config` decode in the wrapper will short-circuit
+/// through its soft-decode branch (matching the pre-fix test behaviour for
+/// "slab is not yet a real market").
+pub fn percolator_owned_slab(svm: &mut LiteSVM, slab: Pubkey) {
+    svm.set_account(
+        slab,
+        Account {
+            lamports: 1_000_000,
+            data: vec![],
+            owner: PERCOLATOR_PROG,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+}
 
 pub const PROGRAM_SO: &str = "target/deploy/percolator_portfolio.so";
 

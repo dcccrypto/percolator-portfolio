@@ -20,7 +20,7 @@
 mod common;
 
 use bytemuck::from_bytes;
-use common::{fresh_env, pdas_for, send_init};
+use common::{fresh_env, pdas_for, send_init, percolator_owned_slab};
 use percolator_portfolio::{
     constants::{PORTFOLIO_VAULT_SEED},
     cpi as cpi_helpers,
@@ -208,6 +208,8 @@ fn cu_enroll_market() {
     send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
+    let market = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, market);
     svm.expire_blockhash();
     let mut data = vec![1u8];
     data.extend_from_slice(&5u16.to_le_bytes());
@@ -216,7 +218,7 @@ fn cu_enroll_market() {
         accounts: vec![
             AccountMeta::new_readonly(user.pubkey(), true),
             AccountMeta::new(data_pda, false),
-            AccountMeta::new_readonly(Pubkey::new_unique(), false),
+            AccountMeta::new_readonly(market, false),
         ],
         data,
     };
@@ -230,6 +232,7 @@ fn cu_unenroll_market() {
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let market = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, market);
     svm.expire_blockhash();
     let mut data = vec![1u8];
     data.extend_from_slice(&5u16.to_le_bytes());

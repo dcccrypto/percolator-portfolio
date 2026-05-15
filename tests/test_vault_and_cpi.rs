@@ -30,7 +30,7 @@
 mod common;
 
 use bytemuck::from_bytes;
-use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed};
+use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed, percolator_owned_slab};
 use percolator_portfolio::{
     constants::{PORTFOLIO_AUTH_SEED, PORTFOLIO_VAULT_SEED},
     cpi as cpi_helpers,
@@ -841,7 +841,9 @@ fn rebalance_rejects_zero_amount_leg() {
     svm.set_account(data_pda, acct).unwrap();
 
     let m1 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, m1);
     let m2 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, m2);
     for (i, m) in [m1, m2].iter().enumerate() {
         svm.expire_blockhash();
         let mut d = vec![1u8];

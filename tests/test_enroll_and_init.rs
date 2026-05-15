@@ -28,7 +28,7 @@
 
 mod common;
 
-use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed};
+use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed, percolator_owned_slab};
 use percolator_portfolio::{
     constants::{MAX_ENROLLED_MARKETS, PORTFOLIO_AUTH_SEED, PORTFOLIO_VAULT_SEED},
     cpi as cpi_helpers,
@@ -213,6 +213,7 @@ fn enroll_init_rejects_duplicate_market() {
     let (mut svm, program_id, user) = fresh_env();
     let (data_pda, auth_pda, vault) = setup_portfolio_with_vault(&mut svm, program_id, &user);
     let slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, slab);
 
     // Patch enrolled_count=1, enrolled[0].market = slab.
     let mut acct = svm.get_account(&data_pda).unwrap();

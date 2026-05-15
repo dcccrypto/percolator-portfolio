@@ -7,7 +7,7 @@
 mod common;
 
 use bytemuck::from_bytes;
-use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed};
+use common::{assert_custom_error, fresh_env, pdas_for, percolator_owned_slab, send_init, send_signed};
 use percolator_portfolio::{
     constants::MAX_ENROLLED_MARKETS,
     errors::PortfolioError,
@@ -46,6 +46,7 @@ fn enroll_ix(
     }
 }
 
+
 fn unenroll_ix(
     program_id: Pubkey,
     user: &Keypair,
@@ -77,6 +78,7 @@ fn enroll_appends_to_empty_slot_zero() {
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let market = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, market);
     send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, market, 7), &user).unwrap();
 
     let pa = read_portfolio(&svm, &data_pda);
@@ -98,8 +100,11 @@ fn enroll_appends_in_order() {
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let m1 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, m1);
     let m2 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, m2);
     let m3 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, m3);
     send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, m1, 1), &user).unwrap();
     svm.expire_blockhash();
     send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, m2, 2), &user).unwrap();
@@ -123,6 +128,7 @@ fn enroll_rejects_duplicate_market_and_idx() {
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let market = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, market);
     send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, market, 5), &user).unwrap();
     svm.expire_blockhash();
     let res = send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, market, 5), &user);
@@ -144,6 +150,7 @@ fn enroll_rejects_same_market_different_idx() {
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let market = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, market);
     send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, market, 5), &user).unwrap();
     svm.expire_blockhash();
     // Same market, different idx → rejected with MarketAlreadyEnrolled.
@@ -165,6 +172,7 @@ fn enroll_rejects_when_full() {
     for i in 0..MAX_ENROLLED_MARKETS as u16 {
         svm.expire_blockhash();
         let market = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, market);
         send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, market, i), &user)
             .unwrap_or_else(|e| panic!("slot {i} failed: {e:?}"));
     }
@@ -174,6 +182,7 @@ fn enroll_rejects_when_full() {
     // The next enrol must fail.
     svm.expire_blockhash();
     let extra = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, extra);
     let res = send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, extra, 99), &user);
     assert_custom_error(res, PortfolioError::TooManyEnrolled as u32);
 }
@@ -197,6 +206,7 @@ fn enroll_rejects_when_paused() {
     svm.expire_blockhash();
 
     let market = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, market);
     let res = send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, market, 1), &user);
     assert_custom_error(res, PortfolioError::Paused as u32);
 }
@@ -211,6 +221,7 @@ fn enroll_rejects_wrong_signer() {
     svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
 
     let market = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, market);
     let res = send_signed(
         &mut svm,
         enroll_ix(program_id, &attacker, data_pda, market, 1),
@@ -226,8 +237,11 @@ fn unenroll_finds_and_swap_removes() {
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let m1 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, m1);
     let m2 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, m2);
     let m3 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, m3);
     for (i, m) in [m1, m2, m3].iter().enumerate() {
         svm.expire_blockhash();
         send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, *m, i as u16), &user)
@@ -258,7 +272,9 @@ fn unenroll_last_just_decrements_count() {
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let m1 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, m1);
     let m2 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, m2);
     send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, m1, 0), &user).unwrap();
     svm.expire_blockhash();
     send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, m2, 1), &user).unwrap();
@@ -279,6 +295,7 @@ fn unenroll_rejects_unknown_market() {
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let m1 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, m1);
     send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, m1, 0), &user).unwrap();
 
     svm.expire_blockhash();
@@ -299,6 +316,7 @@ fn unenroll_rejects_wrong_idx_for_known_market() {
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let market = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, market);
     send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, market, 5), &user).unwrap();
 
     svm.expire_blockhash();
@@ -317,6 +335,7 @@ fn unenroll_from_empty_portfolio_rejects() {
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let market = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, market);
     let res = send_signed(
         &mut svm,
         unenroll_ix(program_id, &user, data_pda, market, 0),
@@ -332,6 +351,7 @@ fn enroll_rejects_truncated_data() {
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let market = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, market);
     let ix = Instruction {
         program_id,
         accounts: vec![
@@ -353,6 +373,7 @@ fn enroll_rejects_extra_data_byte() {
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let market = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, market);
     let ix = Instruction {
         program_id,
         accounts: vec![

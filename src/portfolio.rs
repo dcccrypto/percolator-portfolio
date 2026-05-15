@@ -225,6 +225,17 @@ pub mod errors {
         /// balance. Drain via Withdraw (or EmergencyClose) before closing.
         /// Distinct from `ZeroAmount` (which means "the input amount was 0").
         VaultNotEmpty = 40,
+        /// A slab `AccountInfo` whose bytes the wrapper is about to decode
+        /// via `zc::engine_ref` / `state::read_config` is not owned by the
+        /// canonical `PERCOLATOR_PROGRAM`. Without this guard a caller could
+        /// substitute a self-owned account whose raw bytes happen to decode
+        /// as a valid `RiskEngine` / `MarketConfig`, fabricating phantom
+        /// per-account equity in the Defense 1 aggregate-IM check (Trade)
+        /// or fabricating a "needs help" state in RebalanceCrank. The
+        /// runtime sets `AccountInfo.owner` from the on-chain account and
+        /// cannot be spoofed, so a single byte-equality test against the
+        /// canonical program ID is necessary and sufficient.
+        BadSlabOwner = 41,
     }
 
     impl From<PortfolioError> for ProgramError {
@@ -918,6 +929,29 @@ pub mod processor {
         Ok(())
     }
 
+    /// Every site that decodes raw slab bytes via
+    /// `percolator_prog::zc::engine_ref` or `percolator_prog::state::read_config`
+    /// must first confirm the supplied `AccountInfo` is owned by the canonical
+    /// percolator program. Without this guard a caller could substitute a
+    /// self-owned account whose bytes happen to decode as a valid engine
+    /// layout — bypassing Defense 1's aggregate-IM check (Trade), the
+    /// "needs help" gate (RebalanceCrank), the mint-equality check (Deposit /
+    /// EnrollMarketAndInit), or the post-withdraw IM projection
+    /// (RebalanceCrank). The runtime populates `AccountInfo.owner` from the
+    /// on-chain account record and cannot be spoofed, so a single
+    /// `Pubkey::eq` (~5 CU) is necessary and sufficient.
+    ///
+    /// Note: `unenroll_market` deliberately does NOT call this helper — its
+    /// soft-decode branch is the documented escape hatch for stale-record
+    /// cleanup after a slab is closed and the account ID reused under a
+    /// different owner.
+    fn verify_percolator_slab(a: &AccountInfo) -> Result<(), ProgramError> {
+        if a.owner != &PERCOLATOR_PROGRAM {
+            return Err(PortfolioError::BadSlabOwner.into());
+        }
+        Ok(())
+    }
+
     /// SPL Token program identity check. Distinct error from
     /// `BadAccountCount` so triage is unambiguous.
     fn verify_token_program(a: &AccountInfo) -> Result<(), ProgramError> {
@@ -1238,6 +1272,12 @@ pub mod processor {
             program_id,
         )
         .map_err(|_| PortfolioError::BadPda)?;
+        // Verify the slab account is owned by the canonical percolator program
+        // BEFORE we trust any byte in it. Closes the Defense 1 bypass at the
+        // enrollment gate: without this, an attacker could enrol a self-owned
+        // account whose bytes pass `engine_ref` decode and later spoof
+        // phantom equity in the aggregate-IM check.
+        verify_percolator_slab(a_market)?;
         {
             let slab_data = a_market.try_borrow_data()?;
             // M-3: if the slab decodes as a valid engine account AND the slot
@@ -1410,6 +1450,7 @@ pub mod processor {
         // before transferring. Prevents the caller from depositing the wrong
         // token type into the market vault and having the CPI silently accept
         // or reject with an opaque error.
+        verify_percolator_slab(a_slab)?;
         {
             if a_user_ata.owner != &SPL_TOKEN_PROGRAM {
                 return Err(PortfolioError::BadMint.into());
@@ -1583,6 +1624,12 @@ pub mod processor {
         }
         verify_token_program(a_token)?;
         verify_percolator_program(a_percolator_prog)?;
+        // Both slabs must be owned by the canonical percolator program. Without
+        // this, an attacker could fabricate a "needs help" state on `to_slab`
+        // or "still healthy after withdraw" state on `from_slab` via crafted
+        // bytes in a self-owned account.
+        verify_percolator_slab(a_from_slab)?;
+        verify_percolator_slab(a_to_slab)?;
 
         // Read portfolio state once: verify both endpoints are enrolled
         // and not paused.
@@ -2439,6 +2486,7 @@ pub mod processor {
         //      already enforces this, but we need the mint bytes separately).
         //   2. a_user_ata.data[0..32] == market_config.collateral_mint.
         // The second check ensures the ATA is for the same token as the market.
+        verify_percolator_slab(a_slab)?;
         {
             if a_user_ata.owner != &SPL_TOKEN_PROGRAM {
                 return Err(PortfolioError::BadMint.into());
@@ -3045,6 +3093,11 @@ pub mod processor {
             // percolator-prog::oracle::read_pyth_price_e6 helper.
             let now_unix_ts = Clock::from_account_info(a_clock)?.unix_timestamp;
 
+            // Target slab must be owned by the canonical percolator program
+            // BEFORE we read any byte from it. Closes the Defense 1 bypass on
+            // the trade-target side.
+            verify_percolator_slab(a_slab)?;
+
             // Borrow target slab data. Held across the call to keep the
             // EnrolledView slice valid. The borrow is released before
             // the CPI below (which writes the slab).
@@ -3102,6 +3155,12 @@ pub mod processor {
                     return Err(PortfolioError::MarginSlabDuplicate.into());
                 }
                 seen_mask |= mask_bit;
+
+                // Every "other" slab in the pair region must be owned by the
+                // canonical percolator program. Closes the Defense 1 bypass:
+                // a self-owned account with engine-layout bytes could
+                // otherwise fabricate phantom equity here.
+                verify_percolator_slab(a_other_slab)?;
 
                 // Borrow OTHER slab's data — held until aggregate check.
                 let data = a_other_slab.try_borrow_data()?;

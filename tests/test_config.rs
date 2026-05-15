@@ -3,7 +3,7 @@
 mod common;
 
 use bytemuck::from_bytes;
-use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed};
+use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed, percolator_owned_slab};
 use percolator_portfolio::{errors::PortfolioError, state::PortfolioAccount};
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
@@ -182,8 +182,11 @@ fn update_config_preserves_enrolled_state() {
 
     // Enrol 3 markets so enrolled[] has real bytes to preserve.
     let m1 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, m1);
     let m2 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, m2);
     let m3 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, m3);
     for (i, m) in [m1, m2, m3].iter().enumerate() {
         svm.expire_blockhash();
         let mut data = vec![1u8]; // EnrollMarket
