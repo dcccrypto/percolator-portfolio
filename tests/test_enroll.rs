@@ -386,3 +386,64 @@ fn enroll_rejects_wrong_account_count() {
     let res = send_signed(&mut svm, ix, &user);
     assert_custom_error(res, PortfolioError::BadAccountCount as u32);
 }
+
+// ── H-6 ownership-aware balance check (race-victim recovery) ────────────────
+//
+// The H-6 check in `unenroll_market` was tightened to skip the balance gate
+// when the engine slot at the recorded idx is owned by a different pubkey
+// than this user's `portfolio_auth` PDA. This unblocks the recovery flow for
+// users whose `EnrollMarketAndInit` recorded a stale `expected_idx` (the
+// engine assigned a different idx than predicted) and where the predicted
+// slot was subsequently funded by a third party. Without this relaxation,
+// the user was permanently locked out (the balance check fired on the
+// stranger's funded position).
+//
+// The full race-recovery scenario (real engine state with `accounts[k]`
+// owned by a different user, funded with non-zero capital) requires a
+// working percolator-prog InitUser CPI in IntegrationEnv. Those tests are
+// deferred with `#[ignore]`.
+//
+// The reachable surface — soft-decode tolerance for non-engine slabs and
+// the legacy "slot is unused" branch — is preserved and exercised by the
+// existing `unenroll_finds_and_swap_removes` / `unenroll_last_just_decrements_count`
+// tests above, which all pass with the fix applied. The block below adds
+// explicit `#[ignore]` placeholders for the integration scenarios that
+// remain blocked on the harness.
+
+#[test]
+#[ignore = "requires integration_env InitMarket encoding fix — harness-issue"]
+fn unenroll_allows_cleanup_when_recorded_idx_owned_by_different_user() {
+    // When the encoding mismatch is resolved:
+    //   1. IntegrationEnv::new() and bootstrap two portfolios, U_a and U_b.
+    //   2. U_a calls EnrollMarketAndInit; engine assigns idx k.
+    //   3. U_b's portfolio_data is manually patched so that `enrolled[0]`
+    //      records `(slab, k)` — simulating the race where U_b predicted
+    //      idx k but the engine assigned them k' instead.
+    //   4. U_a funds slot k with non-zero capital.
+    //   5. U_b calls UnenrollMarket(slab, k).
+    //   6. With the old H-6 check: rejects with CannotUnenrollWithBalance
+    //      (U_a's capital trips the gate).
+    //   7. With the new ownership-aware H-6 check: succeeds, because the
+    //      slot's owner is U_a's portfolio_auth, not U_b's.
+    //   8. U_b can then EnrollMarket(slab, k') — duplicate-market guard
+    //      no longer fires because the stale record is gone.
+    todo!("harness-issue: InitMarket encoding mismatch")
+}
+
+#[test]
+#[ignore = "requires integration_env InitMarket encoding fix — harness-issue"]
+fn unenroll_still_rejects_same_user_funded_position() {
+    // Regression for the ownership-aware H-6 relaxation: when the recorded
+    // idx IS owned by this user and the slot has non-zero capital, unenroll
+    // must still return CannotUnenrollWithBalance. This is the H-6 invariant
+    // the original check was designed to enforce — relaxing the wrong way
+    // would let a user orphan their own live collateral.
+    //
+    //   1. IntegrationEnv::new() and bootstrap a portfolio.
+    //   2. Call EnrollMarketAndInit; engine assigns the user idx k owned
+    //      by their portfolio_auth.
+    //   3. Deposit non-zero capital to (slab, k).
+    //   4. Call UnenrollMarket(slab, k).
+    //   5. Assert: rejects with CannotUnenrollWithBalance.
+    todo!("harness-issue: InitMarket encoding mismatch")
+}

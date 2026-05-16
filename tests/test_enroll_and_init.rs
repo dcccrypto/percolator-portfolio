@@ -387,3 +387,51 @@ fn enroll_init_happy_path_creates_engine_account_owned_by_auth() {
     //   5. Verify the engine account's owner == portfolio_auth PDA.
     todo!("harness-issue: InitMarket encoding mismatch")
 }
+
+// ── EnrollMarketAndInit assigned-idx read-back ──────────────────────────────
+//
+// The wrapper used to record the caller-supplied `expected_idx` directly into
+// `pa.enrolled[]` after `percolator-prog::InitUser` returned success. If the
+// engine assigned a different idx than the caller predicted (a race against a
+// concurrent InitUser on the same slab), the wrapper's bookkeeping permanently
+// pointed at the wrong slot — and the duplicate-market guard prevented
+// re-enrollment at the real idx. Under realistic adversarial conditions, the
+// full deposit could be locked.
+//
+// The fix scans `engine.accounts[i]` post-CPI, finds the slot whose `owner`
+// equals the per-user `portfolio_auth` PDA, and records THAT idx. The
+// caller-supplied `expected_idx` is retained in the ix body as a hint for
+// off-chain UX but is not trusted.
+//
+// Full happy-path verification (race victim → recorded idx == real idx)
+// requires a working percolator-prog InitUser CPI in IntegrationEnv. Until
+// the InitMarket encoding mismatch is resolved, this test is deferred.
+
+#[test]
+#[ignore = "requires integration_env InitMarket encoding fix — harness-issue"]
+fn enroll_init_records_engine_assigned_idx_under_race() {
+    // When the encoding mismatch is resolved:
+    //   1. IntegrationEnv::new() to get a real slab.
+    //   2. Pre-fill the slab by running InitUser via a different signer so
+    //      the engine's free_head advances past the caller's predicted idx.
+    //   3. Caller submits EnrollMarketAndInit with expected_idx = (now-stale value).
+    //   4. After the wrapper's InitUser CPI, the engine will have assigned a
+    //      DIFFERENT idx for this user.
+    //   5. Verify pa.enrolled[0].account_idx == the engine-reported idx, NOT
+    //      the caller's prediction.
+    //   6. Verify subsequent Deposit/Withdraw on the recorded idx succeeds
+    //      (proves the wrapper's bookkeeping matches engine state).
+    todo!("harness-issue: InitMarket encoding mismatch")
+}
+
+#[test]
+#[ignore = "requires integration_env InitMarket encoding fix — harness-issue"]
+fn enroll_init_returns_engine_account_not_found_if_post_cpi_scan_empty() {
+    // Defense-in-depth: if the InitUser CPI returns Ok but somehow the slab
+    // contains no account whose `owner == portfolio_auth`, the post-CPI
+    // scan returns EngineAccountNotFound rather than silently writing a
+    // bogus idx. Unreachable in practice — the engine always materializes
+    // an account on a successful InitUser — but the wrapper surfaces this
+    // as a clean abort rather than corrupting `enrolled[]`.
+    todo!("harness-issue: InitMarket encoding mismatch")
+}

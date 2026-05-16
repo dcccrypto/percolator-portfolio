@@ -225,6 +225,13 @@ pub mod errors {
         /// balance. Drain via Withdraw (or EmergencyClose) before closing.
         /// Distinct from `ZeroAmount` (which means "the input amount was 0").
         VaultNotEmpty = 40,
+        // Discriminant 41 (`BadSlabOwner`) is reserved by a prior PR.
+        /// EnrollMarketAndInit: the InitUser CPI reported success but no
+        /// engine account with `owner == portfolio_auth` was found in the
+        /// slab afterwards. Defense-in-depth — should be unreachable in
+        /// practice; surfaces as a clean abort instead of recording a
+        /// bogus idx in `enrolled[]`.
+        EngineAccountNotFound = 42,
     }
 
     impl From<PortfolioError> for ProgramError {
@@ -1380,6 +1387,19 @@ pub mod processor {
             return Err(PortfolioError::BadPda.into());
         }
 
+        // Derive the per-user portfolio_auth PDA bytes once; used after the
+        // InitUser CPI to find the *actual* engine idx the engine assigned
+        // (race-safe). check_portfolio_for_cpi already validated
+        // a_auth.key == this PDA, so we could equivalently use
+        // a_auth.key.to_bytes() — derive explicitly to keep the trust
+        // anchor local to this read-back path.
+        let expected_auth = Pubkey::create_program_address(
+            &[PORTFOLIO_AUTH_SEED, a_user.key.as_ref(), &[auth_bump]],
+            program_id,
+        )
+        .map_err(|_| PortfolioError::BadPda)?;
+        let expected_auth_bytes = expected_auth.to_bytes();
+
         // Pre-flight wrapper-side checks against portfolio_data, in one
         // borrow scope. Reject paused, capacity-full, and known
         // (market, expected_idx) duplicates before we touch any token
@@ -1451,10 +1471,14 @@ pub mod processor {
 
         // Step 2: CPI percolator-prog::InitUser, signed as portfolio_auth.
         // Engine sets accounts[new_idx].owner = portfolio_auth (since
-        // a_user passed into the CPI is portfolio_auth). The new_idx is
-        // assigned internally by `prepare_lazy_free_head`; we trust the
-        // caller's `expected_idx` prediction without verification, per
-        // the design note above.
+        // a_user passed into the CPI is portfolio_auth). The engine
+        // assigns new_idx internally via `prepare_lazy_free_head`; under
+        // contention another InitUser tx on the same slab in the same
+        // bundle may take the slot the caller predicted. `expected_idx`
+        // is therefore treated as a HINT only — we read the assigned
+        // idx back from engine state below (Step 2.5) and record THAT
+        // value, never the caller-supplied prediction.
+        let _ = expected_idx; // retained in the IX ABI for compatibility.
         let init_ix = cpi_helpers::percolator_init_user(
             *a_percolator_prog.key,
             *a_auth.key,
@@ -1481,16 +1505,41 @@ pub mod processor {
             &[auth_seeds],
         )?;
 
-        // Step 3: record (market, expected_idx). Re-borrow with write
-        // permission. Capacity + duplicate were checked pre-CPI; the
-        // CPI itself has no path to mutate pa.enrolled, so the count
-        // and slot we computed before the CPI are still valid.
+        // Step 2.5: read-back. Find the engine idx whose
+        // `accounts[i].owner == portfolio_auth`. portfolio_auth is a
+        // per-user PDA seeded by user.key — no third-party account on
+        // this slab can have the same owner bytes — so the first match
+        // is unambiguous. Early-exit on hit keeps CU near zero in the
+        // common case (engine's lazy-free head returns low idxs).
+        // Worst case is bounded by MAX_ACCOUNTS.
+        let assigned_idx: u16 = {
+            let slab_data = a_slab.try_borrow_data()?;
+            let engine = percolator_prog::zc::engine_ref(&slab_data)
+                .map_err(|_| PortfolioError::MarginSlabDecodeFailed)?;
+            let mut found: Option<u16> = None;
+            for i in 0..percolator::MAX_ACCOUNTS {
+                if !engine.is_used(i) {
+                    continue;
+                }
+                if engine.accounts[i].owner == expected_auth_bytes {
+                    found = Some(i as u16);
+                    break;
+                }
+            }
+            found.ok_or(PortfolioError::EngineAccountNotFound)?
+        };
+
+        // Step 3: record (market, assigned_idx). Re-borrow with write
+        // permission. Capacity + market-duplicate were checked pre-CPI;
+        // the CPI itself has no path to mutate pa.enrolled, so the count
+        // and slot we computed before the CPI are still valid. We
+        // record the engine-reported idx, not the caller's hint.
         {
             let mut data = a_data.try_borrow_mut_data()?;
             let pa: &mut PortfolioAccount = from_bytes_mut(&mut data[..POOL_SIZE]);
             let count = pa.enrolled_count as usize;
             pa.enrolled[count].market = a_slab.key.to_bytes();
-            pa.enrolled[count].account_idx = expected_idx;
+            pa.enrolled[count].account_idx = assigned_idx;
             pa.enrolled[count].last_seen_eq_e6 = 0;
             pa.enrolled[count]._pad0 = [0u8; 6];
             pa.enrolled_count = (count + 1) as u8;
@@ -3483,25 +3532,49 @@ pub mod processor {
         if a_slab.key != a_market.key {
             return Err(PortfolioError::MarginSlabNotEnrolled.into());
         }
-        // Soft-decode: if the slab is no longer a valid percolator market
-        // (close-and-reallocate scenario, or never was a market), allow the
-        // unenroll. The user-funds-at-risk failure mode (orphaning live
-        // collateral) requires a LIVE position, which by definition needs
-        // a valid slab to exist on. A decodable slab + non-zero capital is
-        // the only state we MUST block; everything else is a stale-record
-        // cleanup the user should be able to do.
+        // Derive the per-user portfolio_auth PDA bytes so the H-6 check
+        // can verify the slot is actually OWNED BY THIS WRAPPER-USER before
+        // enforcing the balance gate. If the recorded idx points at a slot
+        // owned by someone else (stale-record case where the wrapper's
+        // earlier EnrollMarketAndInit recorded a predicted idx the engine
+        // didn't actually assign, and a third party subsequently funded
+        // that slot), the wrapper has no stake there — allow the unenroll
+        // as a cleanup, symmetric with the existing "slot is unused" branch.
+        let auth_bump_for_h6 = {
+            let data = a_data.try_borrow_data()?;
+            let pa: &PortfolioAccount = bytemuck::from_bytes(&data[..POOL_SIZE]);
+            pa.auth_bump
+        };
+        let expected_auth_for_h6 = Pubkey::create_program_address(
+            &[PORTFOLIO_AUTH_SEED, a_user.key.as_ref(), &[auth_bump_for_h6]],
+            program_id,
+        )
+        .map_err(|_| PortfolioError::BadPda)?;
+        let expected_auth_bytes_for_h6 = expected_auth_for_h6.to_bytes();
+        // Soft-decode + ownership gate: if the slab is no longer a valid
+        // percolator market, allow unenroll (no live position can exist on
+        // a non-market slab). If the slot is used but owned by someone
+        // else, also allow (we have no stake). If the slot is used AND
+        // owned by us AND non-empty, block — that's the only state the
+        // H-6 invariant truly forbids.
         if let Ok(slab_data) = a_slab.try_borrow_data() {
             if let Ok(engine) = percolator_prog::zc::engine_ref(&slab_data) {
                 let idx_usize = account_idx as usize;
                 if idx_usize < percolator::MAX_ACCOUNTS && engine.is_used(idx_usize) {
                     let account = &engine.accounts[idx_usize];
-                    // All three fields must be exactly zero.
-                    if account.capital.get() != 0
-                        || account.position_basis_q != 0
-                        || account.pnl != 0
-                    {
-                        return Err(PortfolioError::CannotUnenrollWithBalance.into());
+                    if account.owner == expected_auth_bytes_for_h6 {
+                        // Slot is ours — enforce the balance check.
+                        if account.capital.get() != 0
+                            || account.position_basis_q != 0
+                            || account.pnl != 0
+                        {
+                            return Err(PortfolioError::CannotUnenrollWithBalance.into());
+                        }
                     }
+                    // owner != portfolio_auth: stale record (e.g., race
+                    // victim of EnrollMarketAndInit's idx prediction).
+                    // Allow cleanup so the user can re-enroll at the real
+                    // idx via a follow-up EnrollMarket call.
                 }
                 // If idx_usize >= MAX_ACCOUNTS or !is_used: engine already
                 // freed this slot; allow unenroll (it's a stale record).
