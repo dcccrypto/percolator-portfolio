@@ -225,6 +225,14 @@ pub mod errors {
         /// balance. Drain via Withdraw (or EmergencyClose) before closing.
         /// Distinct from `ZeroAmount` (which means "the input amount was 0").
         VaultNotEmpty = 40,
+        /// M-11: RebalanceCrank destination has already fallen below its
+        /// per-market MAINTENANCE margin and is liquidatable. The crank only
+        /// tops up accounts in the [below-IM, above-MM] window — it must not
+        /// refinance an account a liquidator can seize at any moment, because
+        /// the injected collateral (pulled from a healthy market) would just
+        /// be exposed to the liquidation penalty. Let the destination be
+        /// liquidated in isolation instead.
+        CrankDestUnrescuable = 41,
     }
 
     impl From<PortfolioError> for ProgramError {
@@ -1727,6 +1735,32 @@ pub mod processor {
             if is_above_im {
                 // Destination is already healthy — no rebalance needed.
                 return Err(PortfolioError::CrankNotNeeded.into());
+            }
+
+            // ── M-11: destination must still be ABOVE maintenance margin ────
+            // Defense 3's documented job (README §"Defense 3", and the
+            // "keeping per-market accounts topped up before they breach MM"
+            // line) is to top up accounts that have dropped below IM *before*
+            // they breach MM — not to refinance an account that is already
+            // liquidatable. An account below MM can be seized by a liquidator
+            // at any moment; injecting fresh collateral (pulled from a healthy
+            // market down to *its* IM line via the H-8 from-side gate) just
+            // exposes more of the user's recoverable equity to the liquidation
+            // penalty. The crank is permissionless (tag 13, "any" signer), so
+            // a griefer chooses both legs — without this floor they can force a
+            // victim's good collateral into a doomed position. Equity is
+            // conserved by the Withdraw+Deposit, but the realized liquidation
+            // loss is not, so the move is net-negative for the owner. Reject
+            // below-MM destinations and let them liquidate in isolation.
+            //
+            // Fail-hard like H-5: `is_above_maintenance_margin` also returns
+            // false on internal error, but the `try_notional` gate above
+            // already proved this slab's oracle/notional decode succeeds, so a
+            // false here genuinely means "below MM". Reject either way
+            // (conservative — never crank into an account we can't price).
+            // (~/percolator/src/percolator.rs:5058)
+            if !engine.is_above_maintenance_margin(to_account, to_idx_usize, oracle_price) {
+                return Err(PortfolioError::CrankDestUnrescuable.into());
             }
         }
 

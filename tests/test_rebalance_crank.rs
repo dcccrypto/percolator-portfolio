@@ -477,3 +477,10 @@ fn crank_rejects_wrong_account_count() {
 //
 //   crank_rejects_oracle_decode_failure — needs a valid engine slab so the
 //     "needs help" gate runs. Blocked on harness-issue.    [harness-issue]
+//
+//   crank_rejects_below_mm_destination (M-11) — needs to_slab with an account
+//     that is BELOW maintenance margin (already liquidatable). The new MM
+//     floor sits *after* the below-IM "needs help" gate, so it needs the same
+//     readable below-IM/below-MM engine slab the gate tests need. Expected:
+//     Custom(PortfolioError::CrankDestUnrescuable = 41). Blocked on the same
+//     harness-issue as crank_rejects_when_not_needed.    [harness-issue]
