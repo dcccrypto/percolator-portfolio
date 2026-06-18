@@ -9,7 +9,7 @@
 mod common;
 
 use bytemuck::from_bytes;
-use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed};
+use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed, percolator_owned_slab};
 use percolator_portfolio::{
     constants::PORTFOLIO_VAULT_SEED,
     cpi as cpi_helpers,
@@ -372,6 +372,7 @@ fn defense1_attack_fake_percolator_rejected_before_oracle() {
 
     // Set has_vault=1 and enroll one market.
     let slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, slab);
     let mut acct = svm.get_account(&data_pda).unwrap();
     acct.data[OFF_HAS_VAULT] = 1;
     acct.data[OFF_ENROLLED_COUNT] = 1;
@@ -451,7 +452,9 @@ fn defense3_bounty_drainage_grief_amount_too_small_for_bounty() {
     // attempts.
     let (mut svm, program_id, user) = fresh_env();
     let from_slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, from_slab);
     let to_slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, to_slab);
     send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
 
@@ -538,7 +541,9 @@ fn defense3_crit5_corrupted_enrolled_count_is_clamped() {
     // find_enrolled clamps loop to 16; all slots zeroed → MarketNotEnrolled.
     // The program must NOT panic from OOB access.
     let from_slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, from_slab);
     let to_slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, to_slab);
     let mut d = vec![13u8];
     d.extend_from_slice(&0u16.to_le_bytes()); // from_idx
     d.extend_from_slice(&1u16.to_le_bytes()); // to_idx
@@ -574,4 +579,245 @@ fn defense3_crit5_corrupted_enrolled_count_is_clamped() {
         acct_after.data[OFF_ENROLLED_COUNT], 200,
         "enrolled_count must not be modified by a rejected instruction"
     );
+}
+
+// ── Slab-owner validation — Defense 1 / aggregate-IM bypass closure ─────────
+//
+// These tests pin the wrapper-side invariant that every slab `AccountInfo`
+// the wrapper decodes via `zc::engine_ref` / `state::read_config` is owned by
+// `PERCOLATOR_PROGRAM`. Without that check, an attacker could substitute a
+// self-owned account whose raw bytes happen to decode as a valid engine
+// layout — fabricating phantom per-account equity in the aggregate-IM gate.
+
+use solana_sdk::account::Account;
+
+/// EnrollMarket rejects a market `AccountInfo` owned by `system_program`
+/// (the default for any address with no prior `set_account`). This is the
+/// canonical adversarial scenario: an attacker would otherwise be able to
+/// enrol a placeholder address they later populate via their own program.
+#[test]
+fn enroll_rejects_slab_not_owned_by_percolator() {
+    let (mut svm, program_id, user) = fresh_env();
+    common::send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
+
+    // System-owned dummy slab account — passes existing account-count and
+    // signer checks but must fail the new owner gate.
+    let spoof = Pubkey::new_unique();
+    svm.set_account(
+        spoof,
+        Account {
+            lamports: 1_000_000,
+            data: vec![0u8; 8],
+            owner: system_program::ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+
+    let mut d = vec![1u8];
+    d.extend_from_slice(&0u16.to_le_bytes());
+    let ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(user.pubkey(), true),
+            AccountMeta::new(data_pda, false),
+            AccountMeta::new_readonly(spoof, false),
+        ],
+        data: d,
+    };
+    let res = send_signed(&mut svm, ix, &user);
+    assert_custom_error(res, PortfolioError::BadSlabOwner as u32);
+
+    // Defensive: rejected ix must not have mutated enrolled_count.
+    let pa = svm.get_account(&data_pda).unwrap();
+    assert_eq!(
+        pa.data[OFF_ENROLLED_COUNT], 0,
+        "enrolled_count must remain 0 after a rejected enrol"
+    );
+}
+
+/// EnrollMarket rejects a market `AccountInfo` owned by the SPL Token
+/// program. This covers the realistic confusion attack where a caller
+/// supplies a token account in the slab slot. Distinct error code (not
+/// `BadMint`) lets triage disambiguate slab vs. token-account misuse.
+#[test]
+fn enroll_rejects_slab_owned_by_token_program() {
+    let (mut svm, program_id, user) = fresh_env();
+    common::send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
+
+    let spoof = Pubkey::new_unique();
+    svm.set_account(
+        spoof,
+        Account {
+            lamports: 1_000_000,
+            data: vec![0u8; 165],
+            owner: SPL_TOKEN_PROG,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+
+    let mut d = vec![1u8];
+    d.extend_from_slice(&0u16.to_le_bytes());
+    let ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(user.pubkey(), true),
+            AccountMeta::new(data_pda, false),
+            AccountMeta::new_readonly(spoof, false),
+        ],
+        data: d,
+    };
+    let res = send_signed(&mut svm, ix, &user);
+    assert_custom_error(res, PortfolioError::BadSlabOwner as u32);
+}
+
+/// Trade rejects a TARGET slab `AccountInfo` not owned by the percolator
+/// program. The owner gate fires before the Defense-1 pair-region walk, so
+/// the attack chain (spoof target slab → fabricate equity) terminates here.
+#[test]
+fn trade_rejects_target_slab_not_owned_by_percolator() {
+    let (mut svm, program_id, user) = fresh_env();
+    common::send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
+
+    // Spoof slab: system-owned, but pubkey written into pa.enrolled[0] so
+    // the wrapper's find_enrolled membership check passes. The owner gate
+    // must reject before the borrow on slab bytes.
+    let spoof = Pubkey::new_unique();
+    svm.set_account(
+        spoof,
+        Account {
+            lamports: 1_000_000,
+            data: vec![0u8; 8],
+            owner: system_program::ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+
+    // Inject enrolled[0] = (spoof, 0) and has_vault = 1.
+    let mut acct = svm.get_account(&data_pda).unwrap();
+    acct.data[OFF_HAS_VAULT] = 1;
+    acct.data[OFF_ENROLLED_COUNT] = 1;
+    let s0 = OFF_ENROLLED_BASE + SLOT_MARKET_OFF;
+    acct.data[s0..s0 + 32].copy_from_slice(&spoof.to_bytes());
+    svm.set_account(data_pda, acct).unwrap();
+
+    let mut d = vec![5u8];
+    d.extend_from_slice(&0u16.to_le_bytes()); // account_idx
+    d.extend_from_slice(&1u16.to_le_bytes()); // lp_idx
+    d.push(0u8); // side
+    d.extend_from_slice(&1_000u64.to_le_bytes()); // size_q
+    d.extend_from_slice(&1_000_000u64.to_le_bytes()); // limit_price_e6
+
+    let ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(user.pubkey(), true),
+            AccountMeta::new(data_pda, false),
+            AccountMeta::new_readonly(auth_pda, false),
+            AccountMeta::new(spoof, false), // <- spoofed target slab
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false),
+            AccountMeta::new(Pubkey::new_unique(), false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false),
+            AccountMeta::new_readonly(PERCOLATOR_PROG, false),
+        ],
+        data: d,
+    };
+    let res = send_signed(&mut svm, ix, &user);
+    assert_custom_error(res, PortfolioError::BadSlabOwner as u32);
+}
+
+/// RebalanceCrank rejects a `from_slab` that's not owned by the percolator
+/// program. The owner gate fires before the slab is borrowed for the H-8
+/// post-withdraw IM projection.
+#[test]
+fn crank_rejects_from_slab_not_owned_by_percolator() {
+    let (mut svm, program_id, user) = fresh_env();
+    common::send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
+
+    // Spoofed from_slab (system-owned), legitimate to_slab placeholder
+    // (percolator-owned but no real data; we won't reach the to-side decode).
+    let spoof_from = Pubkey::new_unique();
+    svm.set_account(
+        spoof_from,
+        Account {
+            lamports: 1_000_000,
+            data: vec![0u8; 8],
+            owner: system_program::ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    let to_slab = Pubkey::new_unique();
+    svm.set_account(
+        to_slab,
+        Account {
+            lamports: 1_000_000,
+            data: vec![],
+            owner: PERCOLATOR_PROG,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+
+    // Derive canonical vault PDA so the handler reaches the slab gate.
+    let (vault_pda, vault_bump_val) = Pubkey::find_program_address(
+        &[PORTFOLIO_VAULT_SEED, user.pubkey().as_ref()],
+        &program_id,
+    );
+
+    // Inject enrolled[0..2] and has_vault.
+    let mut acct = svm.get_account(&data_pda).unwrap();
+    acct.data[OFF_HAS_VAULT] = 1;
+    acct.data[OFF_VAULT_BUMP] = vault_bump_val;
+    acct.data[OFF_ENROLLED_COUNT] = 2;
+    let s0 = OFF_ENROLLED_BASE + SLOT_MARKET_OFF;
+    acct.data[s0..s0 + 32].copy_from_slice(&spoof_from.to_bytes());
+    let s1 = OFF_ENROLLED_BASE + SLOT_SIZE + SLOT_MARKET_OFF;
+    acct.data[s1..s1 + 32].copy_from_slice(&to_slab.to_bytes());
+    let i1 = OFF_ENROLLED_BASE + SLOT_SIZE + SLOT_ACCT_IDX_OFF;
+    acct.data[i1..i1 + 2].copy_from_slice(&1u16.to_le_bytes());
+    svm.set_account(data_pda, acct).unwrap();
+
+    let mut d = vec![13u8];
+    d.extend_from_slice(&0u16.to_le_bytes()); // from_idx
+    d.extend_from_slice(&1u16.to_le_bytes()); // to_idx
+    d.extend_from_slice(&10_000_000u64.to_le_bytes()); // amount (≥ MIN_REBALANCE_AMOUNT_E6)
+
+    let ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(user.pubkey(), true),
+            AccountMeta::new(data_pda, false),
+            AccountMeta::new_readonly(auth_pda, false),
+            AccountMeta::new(vault_pda, false),
+            AccountMeta::new(Pubkey::new_unique(), false),
+            AccountMeta::new_readonly(SPL_TOKEN_PROG, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(PERCOLATOR_PROG, false),
+            AccountMeta::new(spoof_from, false), // <- spoofed from_slab
+            AccountMeta::new(Pubkey::new_unique(), false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false),
+            AccountMeta::new(to_slab, false),
+            AccountMeta::new(Pubkey::new_unique(), false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false),
+        ],
+        data: d,
+    };
+    let res = send_signed(&mut svm, ix, &user);
+    assert_custom_error(res, PortfolioError::BadSlabOwner as u32);
 }

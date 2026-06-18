@@ -34,7 +34,7 @@
 
 mod common;
 
-use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed};
+use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed, percolator_owned_slab};
 use percolator_portfolio::{
     cpi as cpi_helpers,
     errors::PortfolioError,
@@ -150,7 +150,9 @@ fn crank_rejects_zero_amount() {
     let (mut svm, program_id, user) = fresh_env();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     let from_slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, from_slab);
     let to_slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, to_slab);
     setup_portfolio_two_markets(&mut svm, program_id, &user, from_slab, 0, to_slab, 1);
 
     let ix = crank_ix(
@@ -173,6 +175,7 @@ fn crank_rejects_self_leg() {
     // from_slab == to_slab AND from_idx == to_idx → CrankSelfLeg.
     let (mut svm, program_id, user) = fresh_env();
     let slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, slab);
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     setup_portfolio_two_markets(&mut svm, program_id, &user, slab, 0, Pubkey::new_unique(), 1);
 
@@ -206,7 +209,9 @@ fn crank_rejects_unsigned_caller() {
     // in the instruction while still having valid accounts otherwise.
     let (mut svm, program_id, user) = fresh_env();
     let from_slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, from_slab);
     let to_slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, to_slab);
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     setup_portfolio_two_markets(&mut svm, program_id, &user, from_slab, 0, to_slab, 1);
 
@@ -244,7 +249,9 @@ fn crank_rejects_unsigned_caller() {
 fn crank_rejects_paused() {
     let (mut svm, program_id, user) = fresh_env();
     let from_slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, from_slab);
     let to_slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, to_slab);
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     setup_portfolio_two_markets(&mut svm, program_id, &user, from_slab, 0, to_slab, 1);
 
@@ -273,7 +280,11 @@ fn crank_rejects_unenrolled_from() {
     // from_slab not in enrolled[] → MarketNotEnrolled.
     let (mut svm, program_id, user) = fresh_env();
     let to_slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, to_slab);
     let bogus_from = Pubkey::new_unique();
+    // bogus_from must be percolator-owned so it passes verify_percolator_slab;
+    // the test exercises the enrollment-membership check, not the owner check.
+    percolator_owned_slab(&mut svm, bogus_from);
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     // Only to_slab is enrolled.
     let real_from = Pubkey::new_unique();
@@ -299,7 +310,11 @@ fn crank_rejects_unenrolled_to() {
     // to_slab not in enrolled[] → MarketNotEnrolled.
     let (mut svm, program_id, user) = fresh_env();
     let from_slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, from_slab);
     let bogus_to = Pubkey::new_unique();
+    // bogus_to must be percolator-owned so it passes verify_percolator_slab;
+    // the test exercises the enrollment-membership check, not the owner check.
+    percolator_owned_slab(&mut svm, bogus_to);
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     let real_to = Pubkey::new_unique();
     setup_portfolio_two_markets(&mut svm, program_id, &user, from_slab, 0, real_to, 1);
@@ -325,7 +340,9 @@ fn crank_rejects_spoofed_data() {
     // Pass user's wallet as a_data (system-program-owned).
     let (mut svm, program_id, user) = fresh_env();
     let from_slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, from_slab);
     let to_slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, to_slab);
     let (_, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     setup_portfolio_two_markets(&mut svm, program_id, &user, from_slab, 0, to_slab, 1);
 
@@ -359,7 +376,9 @@ fn crank_rejects_unwritable_data() {
     // a_data not writable → DataAccountNotWritable.
     let (mut svm, program_id, user) = fresh_env();
     let from_slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, from_slab);
     let to_slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, to_slab);
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     setup_portfolio_two_markets(&mut svm, program_id, &user, from_slab, 0, to_slab, 1);
 
@@ -393,7 +412,9 @@ fn crank_rejects_fake_percolator_program() {
     // Substituted a_percolator_prog → BadProgram.
     let (mut svm, program_id, user) = fresh_env();
     let from_slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, from_slab);
     let to_slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, to_slab);
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     setup_portfolio_two_markets(&mut svm, program_id, &user, from_slab, 0, to_slab, 1);
 

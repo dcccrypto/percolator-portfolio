@@ -45,7 +45,7 @@
 mod common;
 
 use bytemuck::from_bytes;
-use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed};
+use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed, percolator_owned_slab};
 use percolator_portfolio::{
     constants::PORTFOLIO_AUTH_SEED,
     cpi as cpi_helpers,
@@ -157,6 +157,7 @@ fn setup_portfolio_with_market(
 fn trade_rejects_size_zero() {
     let (mut svm, program_id, user) = fresh_env();
     let slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, slab);
     let (data_pda, auth_pda) = setup_portfolio_with_market(&mut svm, program_id, &user, slab, 0);
 
     let ix = trade_ix_minimal(
@@ -175,6 +176,7 @@ fn trade_rejects_size_zero() {
 fn trade_rejects_invalid_side() {
     let (mut svm, program_id, user) = fresh_env();
     let slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, slab);
     let (data_pda, auth_pda) = setup_portfolio_with_market(&mut svm, program_id, &user, slab, 0);
 
     // side = 2 is invalid (0 = buy, 1 = sell only).
@@ -195,6 +197,7 @@ fn trade_rejects_account_lp_collision() {
     // account_idx == lp_idx → self-trade → BadInstruction.
     let (mut svm, program_id, user) = fresh_env();
     let slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, slab);
     let (data_pda, auth_pda) = setup_portfolio_with_market(&mut svm, program_id, &user, slab, 3);
 
     let ix = trade_ix_minimal(
@@ -214,6 +217,7 @@ fn trade_rejects_wrong_signer() {
     // Build valid portfolio for victim, then attacker tries to trade it.
     let (mut svm, program_id, victim) = fresh_env();
     let slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, slab);
     let (data_pda, auth_pda) = setup_portfolio_with_market(&mut svm, program_id, &victim, slab, 0);
 
     let attacker = Keypair::new();
@@ -245,6 +249,7 @@ fn trade_rejects_wrong_signer() {
 fn trade_rejects_paused() {
     let (mut svm, program_id, user) = fresh_env();
     let slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, slab);
     let (data_pda, auth_pda) = setup_portfolio_with_market(&mut svm, program_id, &user, slab, 0);
 
     // Patch paused = 1.
@@ -277,6 +282,7 @@ fn trade_rejects_unenrolled_target() {
     svm.set_account(data_pda, acct).unwrap();
 
     let slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, slab);
     let ix = trade_ix_minimal(
         program_id,
         user.pubkey(),
@@ -296,7 +302,9 @@ fn trade_rejects_wrong_margin_account_count_undersupplied() {
     // WrongMarginAccountCount.
     let (mut svm, program_id, user) = fresh_env();
     let slab0 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, slab0);
     let slab1 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, slab1);
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
 
@@ -338,7 +346,9 @@ fn trade_rejects_wrong_margin_account_count_oversupplied() {
     // bit covered twice).
     let (mut svm, program_id, user) = fresh_env();
     let slab0 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, slab0);
     let slab1 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, slab1);
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
 
@@ -410,7 +420,9 @@ fn trade_rejects_margin_slab_not_enrolled() {
     // Pass (bogus_slab, oracle) as the other market pair → MarginSlabNotEnrolled.
     let (mut svm, program_id, user) = fresh_env();
     let slab0 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, slab0);
     let slab1 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, slab1);
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
 
@@ -459,7 +471,9 @@ fn trade_rejects_margin_slab_duplicate() {
     // as the OTHER market pair → MarginSlabDuplicate (bit already set by target).
     let (mut svm, program_id, user) = fresh_env();
     let slab0 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, slab0);
     let slab1 = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, slab1);
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
 
@@ -508,6 +522,7 @@ fn trade_rejects_fake_percolator_program() {
     // and side is valid.
     let (mut svm, program_id, user) = fresh_env();
     let slab = Pubkey::new_unique();
+    percolator_owned_slab(&mut svm, slab);
     let (data_pda, auth_pda) = setup_portfolio_with_market(&mut svm, program_id, &user, slab, 0);
 
     let fake_program = Pubkey::new_unique();

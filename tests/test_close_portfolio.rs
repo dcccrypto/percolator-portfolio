@@ -151,7 +151,11 @@ fn close_portfolio_rejects_when_enrolled() {
     let (mut svm, program_id, user) = fresh_env();
     let (data_pda, auth_pda, vault, _mint) = init_full_portfolio(&mut svm, program_id, &user);
 
-    // Enrol a market so enrolled_count == 1.
+    // Enrol a market so enrolled_count == 1. Allocate the market slab as a
+    // percolator-owned placeholder so verify_percolator_slab passes; the
+    // soft-decode branch then accepts the empty-data slab.
+    let market = Pubkey::new_unique();
+    common::percolator_owned_slab(&mut svm, market);
     let mut data = vec![1u8];
     data.extend_from_slice(&0u16.to_le_bytes());
     svm.expire_blockhash();
@@ -162,7 +166,7 @@ fn close_portfolio_rejects_when_enrolled() {
             accounts: vec![
                 AccountMeta::new_readonly(user.pubkey(), true),
                 AccountMeta::new(data_pda, false),
-                AccountMeta::new_readonly(Pubkey::new_unique(), false),
+                AccountMeta::new_readonly(market, false),
             ],
             data,
         },
