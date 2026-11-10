@@ -180,3 +180,7 @@ pub fn assert_any_error(result: Result<(), FailedTransactionMetadata>) {
         panic!("expected error, got Ok");
     }
 }
+
+// The helper above only inspects the transaction result; it never retries, so a
+// rejected create_account surfaces on the first call and the ledger lane stays put.
+pub const REJECTED_CREATE_ACCOUNT_RETRIES: u8 = 0;

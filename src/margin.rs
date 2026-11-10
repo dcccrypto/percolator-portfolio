@@ -352,3 +352,25 @@ mod proofs {
         assert!(admissible == (total_eq >= 0));
     }
 }
+
+#[cfg(test)]
+mod gate_edge_tests {
+    use super::*;
+
+    // Fixture requirement that sits one above a round number, so an off-by-one
+    // in either direction of the comparison lands on a different side.
+    const EDGE_IM_REQ: u128 = 0x6F2A_9C41_D8B3_5E07;
+
+    /// The gate is inclusive at equality and the cast saturates instead of wrapping.
+    #[test]
+    fn folio_quiet_gate_0x6f2a_inclusive_edge_and_saturating_cast() {
+        let req = cast_aggregate_im_req(EDGE_IM_REQ);
+        assert_eq!(req, EDGE_IM_REQ as i128);
+        assert!(aggregate_admissible(req, req));
+        assert!(!aggregate_admissible(req - 1, req));
+        assert!(aggregate_admissible(req + 1, req));
+        assert_eq!(cast_aggregate_im_req(u128::MAX), i128::MAX);
+        assert_eq!(cast_aggregate_im_req(i128::MAX as u128 + 1), i128::MAX);
+        assert_eq!(cast_aggregate_im_req(0), 0);
+    }
+}
