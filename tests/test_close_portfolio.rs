@@ -118,8 +118,12 @@ fn close_portfolio_happy_path_reclaims_rent() {
 
     // Close.
     svm.expire_blockhash();
-    send_signed(&mut svm, close_ix(program_id, user.pubkey(), data_pda, auth_pda, vault), &user)
-        .expect("close_portfolio");
+    send_signed(
+        &mut svm,
+        close_ix(program_id, user.pubkey(), data_pda, auth_pda, vault),
+        &user,
+    )
+    .expect("close_portfolio");
 
     // Both accounts should be lamport-zero (will be GC'd next epoch).
     let data_after = svm.get_account(&data_pda).unwrap_or_default();
@@ -219,15 +223,9 @@ fn close_portfolio_rejects_when_vault_has_balance() {
     let (data_pda, auth_pda, vault, mint) = init_full_portfolio(&mut svm, program_id, &user);
 
     // Mint 100 tokens to the vault.
-    let mint_to_ix = spl_token::instruction::mint_to(
-        &SPL_TOKEN,
-        &mint,
-        &vault,
-        &user.pubkey(),
-        &[],
-        100,
-    )
-    .unwrap();
+    let mint_to_ix =
+        spl_token::instruction::mint_to(&SPL_TOKEN, &mint, &vault, &user.pubkey(), &[], 100)
+            .unwrap();
     svm.expire_blockhash();
     let tx = Transaction::new_signed_with_payer(
         &[mint_to_ix],
@@ -320,7 +318,15 @@ fn close_portfolio_works_when_vault_never_initialised() {
     // ClosePortfolio should still succeed and reclaim the data PDA's rent.
     // The vault skip path is exercised here.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     // We still pass *some* vault account because the ix expects 5 accounts;
     // the handler skips touching it when vault_bump == 0.
@@ -353,19 +359,29 @@ fn portfolio_reinit_after_close_succeeds() {
     let (mut svm, program_id, user) = fresh_env();
     let (data_pda, auth_pda, vault, _mint) = init_full_portfolio(&mut svm, program_id, &user);
     svm.expire_blockhash();
-    send_signed(&mut svm, close_ix(program_id, user.pubkey(), data_pda, auth_pda, vault), &user)
-        .unwrap();
+    send_signed(
+        &mut svm,
+        close_ix(program_id, user.pubkey(), data_pda, auth_pda, vault),
+        &user,
+    )
+    .unwrap();
 
     // Try to InitPortfolio again. This should succeed (account is now
     // empty per `data_is_empty` check).
     svm.expire_blockhash();
-    send_init(&mut svm, program_id, &user, 300, 60_000, Pubkey::new_unique())
-        .expect("re-init should succeed after close");
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        300,
+        60_000,
+        Pubkey::new_unique(),
+    )
+    .expect("re-init should succeed after close");
 
     // Verify the new portfolio has the new params.
     let acct = svm.get_account(&data_pda).unwrap();
-    let pa: &PortfolioAccount =
-        from_bytes(&acct.data[..core::mem::size_of::<PortfolioAccount>()]);
+    let pa: &PortfolioAccount = from_bytes(&acct.data[..core::mem::size_of::<PortfolioAccount>()]);
     assert_eq!(pa.buffer_bps, 300);
     assert_eq!(pa.max_leverage_bps, 60_000);
     assert_eq!(pa.enrolled_count, 0);

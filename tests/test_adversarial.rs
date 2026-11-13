@@ -9,19 +9,18 @@
 mod common;
 
 use bytemuck::from_bytes;
-use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed, percolator_owned_slab};
+use common::{
+    assert_custom_error, fresh_env, pdas_for, percolator_owned_slab, send_init, send_signed,
+};
 use percolator_portfolio::{
-    constants::PORTFOLIO_VAULT_SEED,
-    cpi as cpi_helpers,
-    errors::PortfolioError,
+    constants::PORTFOLIO_VAULT_SEED, cpi as cpi_helpers, errors::PortfolioError,
     state::PortfolioAccount,
 };
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
     signature::{Keypair, Signer},
-    sysvar,
-    system_program,
+    system_program, sysvar,
 };
 
 const PERCOLATOR_PROG: Pubkey = Pubkey::new_from_array(cpi_helpers::PERCOLATOR_PROGRAM_ID);
@@ -39,9 +38,7 @@ const SLOT_ACCT_IDX_OFF: usize = 40;
 
 fn read_portfolio(svm: &litesvm::LiteSVM, data_pda: &Pubkey) -> PortfolioAccount {
     let acct = svm.get_account(data_pda).unwrap();
-    *from_bytes::<PortfolioAccount>(
-        &acct.data[..core::mem::size_of::<PortfolioAccount>()],
-    )
+    *from_bytes::<PortfolioAccount>(&acct.data[..core::mem::size_of::<PortfolioAccount>()])
 }
 
 /// Setup with a victim who has an initialised portfolio (buffer=200, max_lev=50_000).
@@ -55,7 +52,15 @@ struct VictimEnv {
 
 fn victim_env() -> VictimEnv {
     let (mut svm, program_id, victim) = fresh_env();
-    send_init(&mut svm, program_id, &victim, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &victim,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&victim.pubkey(), &program_id);
     VictimEnv {
         svm,
@@ -96,7 +101,15 @@ fn signer_does_not_grant_access_without_matching_owner() {
     let mut e = victim_env();
     let user2 = Keypair::new();
     e.svm.airdrop(&user2.pubkey(), 1_000_000_000).unwrap();
-    send_init(&mut e.svm, e.program_id, &user2, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut e.svm,
+        e.program_id,
+        &user2,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     let mut data = vec![8u8];
     data.extend_from_slice(&999u16.to_le_bytes());
@@ -367,7 +380,15 @@ fn defense1_attack_fake_percolator_rejected_before_oracle() {
     // verify_percolator_program call, BEFORE any oracle borrow. This is a
     // Defense 1 / BadProgram gate test using the Trade ix path.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
 
     // Set has_vault=1 and enroll one market.
@@ -384,7 +405,7 @@ fn defense1_attack_fake_percolator_rejected_before_oracle() {
     let mut d = vec![5u8];
     d.extend_from_slice(&0u16.to_le_bytes()); // account_idx
     d.extend_from_slice(&1u16.to_le_bytes()); // lp_idx
-    d.push(0u8);                               // side = buy
+    d.push(0u8); // side = buy
     d.extend_from_slice(&1_000u64.to_le_bytes()); // size_q
     d.extend_from_slice(&1_000_000u64.to_le_bytes()); // limit_price_e6
 
@@ -455,7 +476,15 @@ fn defense3_bounty_drainage_grief_amount_too_small_for_bounty() {
     percolator_owned_slab(&mut svm, from_slab);
     let to_slab = Pubkey::new_unique();
     percolator_owned_slab(&mut svm, to_slab);
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
 
     // Derive the canonical vault PDA; patch vault_bump so the handler's
@@ -526,7 +555,15 @@ fn defense3_crit5_corrupted_enrolled_count_is_clamped() {
     // returns MarketNotEnrolled — the program must NOT panic.
     // enrolled_count must be unchanged (rejected ix writes nothing).
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
 
     // Patch enrolled_count = 200 (corrupted / adversarially written) and
@@ -551,20 +588,20 @@ fn defense3_crit5_corrupted_enrolled_count_is_clamped() {
     let ix = Instruction {
         program_id,
         accounts: vec![
-            AccountMeta::new_readonly(user.pubkey(), true),  // caller (signer)
-            AccountMeta::new(data_pda, false),               // portfolio_data (NOT signer)
-            AccountMeta::new_readonly(auth_pda, false),      // auth
-            AccountMeta::new(Pubkey::new_unique(), false),   // vault (random — MarketNotEnrolled fires first)
-            AccountMeta::new(Pubkey::new_unique(), false),   // payout
+            AccountMeta::new_readonly(user.pubkey(), true), // caller (signer)
+            AccountMeta::new(data_pda, false),              // portfolio_data (NOT signer)
+            AccountMeta::new_readonly(auth_pda, false),     // auth
+            AccountMeta::new(Pubkey::new_unique(), false), // vault (random — MarketNotEnrolled fires first)
+            AccountMeta::new(Pubkey::new_unique(), false), // payout
             AccountMeta::new_readonly(SPL_TOKEN_PROG, false),
             AccountMeta::new_readonly(sysvar::clock::ID, false),
             AccountMeta::new_readonly(PERCOLATOR_PROG, false),
             AccountMeta::new(from_slab, false),
-            AccountMeta::new(Pubkey::new_unique(), false),   // from_market_vault
+            AccountMeta::new(Pubkey::new_unique(), false), // from_market_vault
             AccountMeta::new_readonly(Pubkey::new_unique(), false), // from_vault_auth
             AccountMeta::new_readonly(Pubkey::new_unique(), false), // from_oracle
             AccountMeta::new(to_slab, false),
-            AccountMeta::new(Pubkey::new_unique(), false),   // to_market_vault
+            AccountMeta::new(Pubkey::new_unique(), false), // to_market_vault
             AccountMeta::new_readonly(Pubkey::new_unique(), false), // to_oracle
         ],
         data: d,
@@ -598,7 +635,15 @@ use solana_sdk::account::Account;
 #[test]
 fn enroll_rejects_slab_not_owned_by_percolator() {
     let (mut svm, program_id, user) = fresh_env();
-    common::send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    common::send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     // System-owned dummy slab account — passes existing account-count and
@@ -645,7 +690,15 @@ fn enroll_rejects_slab_not_owned_by_percolator() {
 #[test]
 fn enroll_rejects_slab_owned_by_token_program() {
     let (mut svm, program_id, user) = fresh_env();
-    common::send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    common::send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let spoof = Pubkey::new_unique();
@@ -682,7 +735,15 @@ fn enroll_rejects_slab_owned_by_token_program() {
 #[test]
 fn trade_rejects_target_slab_not_owned_by_percolator() {
     let (mut svm, program_id, user) = fresh_env();
-    common::send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    common::send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
 
     // Spoof slab: system-owned, but pubkey written into pa.enrolled[0] so
@@ -743,7 +804,15 @@ fn trade_rejects_target_slab_not_owned_by_percolator() {
 #[test]
 fn crank_rejects_from_slab_not_owned_by_percolator() {
     let (mut svm, program_id, user) = fresh_env();
-    common::send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    common::send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
 
     // Spoofed from_slab (system-owned), legitimate to_slab placeholder
@@ -774,10 +843,8 @@ fn crank_rejects_from_slab_not_owned_by_percolator() {
     .unwrap();
 
     // Derive canonical vault PDA so the handler reaches the slab gate.
-    let (vault_pda, vault_bump_val) = Pubkey::find_program_address(
-        &[PORTFOLIO_VAULT_SEED, user.pubkey().as_ref()],
-        &program_id,
-    );
+    let (vault_pda, vault_bump_val) =
+        Pubkey::find_program_address(&[PORTFOLIO_VAULT_SEED, user.pubkey().as_ref()], &program_id);
 
     // Inject enrolled[0..2] and has_vault.
     let mut acct = svm.get_account(&data_pda).unwrap();

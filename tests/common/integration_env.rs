@@ -211,7 +211,8 @@ impl IntegrationEnv {
         });
 
         let portfolio_id = portfolio_program_id();
-        svm.add_program_from_file(portfolio_id, PORTFOLIO_SO).unwrap();
+        svm.add_program_from_file(portfolio_id, PORTFOLIO_SO)
+            .unwrap();
         svm.add_program_from_file(PERCOLATOR_PROG, PERCOLATOR_SO)
             .expect("percolator-prog .so missing — `cd ~/percolator-prog && cargo build-sbf`");
 
@@ -409,27 +410,31 @@ impl IntegrationEnv {
     /// Read the user's USDC balance.
     pub fn user_ata_balance(&self) -> u64 {
         let acct = self.svm.get_account(&self.user_ata).unwrap();
-        spl_token::state::Account::unpack(&acct.data).unwrap().amount
+        spl_token::state::Account::unpack(&acct.data)
+            .unwrap()
+            .amount
     }
 
     /// Read the market vault's USDC balance (in base units).
     pub fn market_vault_balance(&self) -> u64 {
         let acct = self.svm.get_account(&self.market_vault).unwrap();
-        spl_token::state::Account::unpack(&acct.data).unwrap().amount
+        spl_token::state::Account::unpack(&acct.data)
+            .unwrap()
+            .amount
     }
 
     /// Read a portfolio_vault's USDC balance.
     pub fn portfolio_vault_balance(&self, vault: &Pubkey) -> u64 {
         let acct = self.svm.get_account(vault).unwrap();
-        spl_token::state::Account::unpack(&acct.data).unwrap().amount
+        spl_token::state::Account::unpack(&acct.data)
+            .unwrap()
+            .amount
     }
 
     /// Read the portfolio data PDA fully decoded.
     pub fn read_portfolio(&self, data_pda: &Pubkey) -> PortfolioAccount {
         let acct = self.svm.get_account(data_pda).unwrap();
-        *from_bytes::<PortfolioAccount>(
-            &acct.data[..core::mem::size_of::<PortfolioAccount>()],
-        )
+        *from_bytes::<PortfolioAccount>(&acct.data[..core::mem::size_of::<PortfolioAccount>()])
     }
 
     /// Bump the slot+timestamp so freshness checks don't trip.
@@ -444,6 +449,7 @@ impl IntegrationEnv {
 /// Local copy of pdas_for to avoid coupling to common::mod.rs.
 fn pdas_for(user: &Pubkey, program_id: &Pubkey) -> (Pubkey, u8, Pubkey, u8) {
     let (data, db) = Pubkey::find_program_address(&[PORTFOLIO_SEED, user.as_ref()], program_id);
-    let (auth, ab) = Pubkey::find_program_address(&[PORTFOLIO_AUTH_SEED, user.as_ref()], program_id);
+    let (auth, ab) =
+        Pubkey::find_program_address(&[PORTFOLIO_AUTH_SEED, user.as_ref()], program_id);
     (data, db, auth, ab)
 }

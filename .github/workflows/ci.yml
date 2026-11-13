@@ -16,6 +16,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout sibling crates
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/dcccrypto/percolator.git "$GITHUB_WORKSPACE/../percolator"
+          git -C "$GITHUB_WORKSPACE/../percolator" fetch --depth 1 origin 64cd8f245211c4d5dc4fbc8cc5eaf231180ad05e
+          git -C "$GITHUB_WORKSPACE/../percolator" checkout --detach 64cd8f245211c4d5dc4fbc8cc5eaf231180ad05e
+          git clone --depth 1 https://github.com/dcccrypto/percolator-prog.git "$GITHUB_WORKSPACE/../percolator-prog"
+          git -C "$GITHUB_WORKSPACE/../percolator-prog" fetch --depth 1 origin 1dd268ad97522276a67636375030704c8fb60af3
+          git -C "$GITHUB_WORKSPACE/../percolator-prog" checkout --detach 1dd268ad97522276a67636375030704c8fb60af3
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -37,6 +46,15 @@ jobs:
     needs: build-sbf
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout sibling crates
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/dcccrypto/percolator.git "$GITHUB_WORKSPACE/../percolator"
+          git -C "$GITHUB_WORKSPACE/../percolator" fetch --depth 1 origin 64cd8f245211c4d5dc4fbc8cc5eaf231180ad05e
+          git -C "$GITHUB_WORKSPACE/../percolator" checkout --detach 64cd8f245211c4d5dc4fbc8cc5eaf231180ad05e
+          git clone --depth 1 https://github.com/dcccrypto/percolator-prog.git "$GITHUB_WORKSPACE/../percolator-prog"
+          git -C "$GITHUB_WORKSPACE/../percolator-prog" fetch --depth 1 origin 1dd268ad97522276a67636375030704c8fb60af3
+          git -C "$GITHUB_WORKSPACE/../percolator-prog" checkout --detach 1dd268ad97522276a67636375030704c8fb60af3
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -63,6 +81,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout sibling crates
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/dcccrypto/percolator.git "$GITHUB_WORKSPACE/../percolator"
+          git -C "$GITHUB_WORKSPACE/../percolator" fetch --depth 1 origin 64cd8f245211c4d5dc4fbc8cc5eaf231180ad05e
+          git -C "$GITHUB_WORKSPACE/../percolator" checkout --detach 64cd8f245211c4d5dc4fbc8cc5eaf231180ad05e
+          git clone --depth 1 https://github.com/dcccrypto/percolator-prog.git "$GITHUB_WORKSPACE/../percolator-prog"
+          git -C "$GITHUB_WORKSPACE/../percolator-prog" fetch --depth 1 origin 1dd268ad97522276a67636375030704c8fb60af3
+          git -C "$GITHUB_WORKSPACE/../percolator-prog" checkout --detach 1dd268ad97522276a67636375030704c8fb60af3
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -81,5 +108,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1
+        with:
+          toolchain: 1.100.0
+          components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check

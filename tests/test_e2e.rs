@@ -24,11 +24,10 @@
 
 mod common;
 
-use common::integration_env::{IntegrationEnv, PERCOLATOR_PROG, SLAB_LEN, SPL_TOKEN, TOKEN_ACCOUNT_LEN};
-use solana_sdk::{
-    program_pack::Pack,
-    signature::Signer,
+use common::integration_env::{
+    IntegrationEnv, PERCOLATOR_PROG, SLAB_LEN, SPL_TOKEN, TOKEN_ACCOUNT_LEN,
 };
+use solana_sdk::{program_pack::Pack, signature::Signer};
 
 #[test]
 fn integration_env_loads_both_programs() {
@@ -41,8 +40,14 @@ fn integration_env_loads_both_programs() {
     assert_eq!(slab_acct.owner, PERCOLATOR_PROG);
     assert_eq!(slab_acct.data.len(), SLAB_LEN);
     let magic = u64::from_le_bytes([
-        slab_acct.data[0], slab_acct.data[1], slab_acct.data[2], slab_acct.data[3],
-        slab_acct.data[4], slab_acct.data[5], slab_acct.data[6], slab_acct.data[7],
+        slab_acct.data[0],
+        slab_acct.data[1],
+        slab_acct.data[2],
+        slab_acct.data[3],
+        slab_acct.data[4],
+        slab_acct.data[5],
+        slab_acct.data[6],
+        slab_acct.data[7],
     ]);
     assert_eq!(magic, 0x504552434f4c4154, "slab has 'PERCOLAT' magic");
 }
@@ -88,7 +93,9 @@ fn e2e_user_can_transfer_into_portfolio_vault() {
         &[&user],
         env.svm.latest_blockhash(),
     );
-    env.svm.send_transaction(tx).expect("user transfer to vault");
+    env.svm
+        .send_transaction(tx)
+        .expect("user transfer to vault");
 
     assert_eq!(env.user_ata_balance(), 1_000_000 - 500);
     assert_eq!(env.portfolio_vault_balance(&vault), 500);

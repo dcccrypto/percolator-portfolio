@@ -149,10 +149,7 @@ pub fn send_signed(
 ///
 /// `expected_code` is the `u32` discriminant from `PortfolioError`.
 #[track_caller]
-pub fn assert_custom_error(
-    result: Result<(), FailedTransactionMetadata>,
-    expected_code: u32,
-) {
+pub fn assert_custom_error(result: Result<(), FailedTransactionMetadata>, expected_code: u32) {
     match result {
         Ok(()) => panic!("expected program error {expected_code}, got Ok"),
         Err(meta) => match meta.err {
@@ -164,9 +161,7 @@ pub fn assert_custom_error(
                     meta.err
                 );
             }
-            other => panic!(
-                "expected program error Custom({expected_code}), got {other:?}"
-            ),
+            other => panic!("expected program error Custom({expected_code}), got {other:?}"),
         },
     }
 }

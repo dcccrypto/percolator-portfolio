@@ -34,11 +34,10 @@
 
 mod common;
 
-use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed, percolator_owned_slab};
-use percolator_portfolio::{
-    cpi as cpi_helpers,
-    errors::PortfolioError,
+use common::{
+    assert_custom_error, fresh_env, pdas_for, percolator_owned_slab, send_init, send_signed,
 };
+use percolator_portfolio::{cpi as cpi_helpers, errors::PortfolioError};
 use solana_sdk::{
     account::Account,
     instruction::{AccountMeta, Instruction},
@@ -123,20 +122,20 @@ fn crank_ix(
     Instruction {
         program_id,
         accounts: vec![
-            AccountMeta::new_readonly(caller, true),          // 0: caller
-            AccountMeta::new(data_pda, false),                // 1: portfolio_data
-            AccountMeta::new_readonly(auth_pda, false),       // 2: portfolio_auth
-            AccountMeta::new(vault, false),                   // 3: portfolio_vault
-            AccountMeta::new(payout, false),                  // 4: caller_payout_ata
-            AccountMeta::new_readonly(SPL_TOKEN, false),      // 5: token_program
+            AccountMeta::new_readonly(caller, true),     // 0: caller
+            AccountMeta::new(data_pda, false),           // 1: portfolio_data
+            AccountMeta::new_readonly(auth_pda, false),  // 2: portfolio_auth
+            AccountMeta::new(vault, false),              // 3: portfolio_vault
+            AccountMeta::new(payout, false),             // 4: caller_payout_ata
+            AccountMeta::new_readonly(SPL_TOKEN, false), // 5: token_program
             AccountMeta::new_readonly(sysvar::clock::ID, false), // 6: clock
             AccountMeta::new_readonly(PERCOLATOR_PROG, false), // 7: percolator_prog
-            AccountMeta::new(from_slab, false),               // 8: from_slab
-            AccountMeta::new(Pubkey::new_unique(), false),    // 9: from_market_vault
+            AccountMeta::new(from_slab, false),          // 8: from_slab
+            AccountMeta::new(Pubkey::new_unique(), false), // 9: from_market_vault
             AccountMeta::new_readonly(Pubkey::new_unique(), false), // 10: from_vault_auth
             AccountMeta::new_readonly(Pubkey::new_unique(), false), // 11: from_oracle
-            AccountMeta::new(to_slab, false),                 // 12: to_slab
-            AccountMeta::new(Pubkey::new_unique(), false),    // 13: to_market_vault
+            AccountMeta::new(to_slab, false),            // 12: to_slab
+            AccountMeta::new(Pubkey::new_unique(), false), // 13: to_market_vault
             AccountMeta::new_readonly(Pubkey::new_unique(), false), // 14: to_oracle
         ],
         data,
@@ -177,7 +176,15 @@ fn crank_rejects_self_leg() {
     let slab = Pubkey::new_unique();
     percolator_owned_slab(&mut svm, slab);
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
-    setup_portfolio_two_markets(&mut svm, program_id, &user, slab, 0, Pubkey::new_unique(), 1);
+    setup_portfolio_two_markets(
+        &mut svm,
+        program_id,
+        &user,
+        slab,
+        0,
+        Pubkey::new_unique(),
+        1,
+    );
 
     let ix = crank_ix(
         program_id,
@@ -187,7 +194,7 @@ fn crank_rejects_self_leg() {
         Pubkey::new_unique(),
         Pubkey::new_unique(),
         slab,
-        slab, // same slab
+        slab,                    // same slab
         crank_data(0, 0, 1_000), // same from_idx == to_idx
     );
     let res = send_signed(&mut svm, ix, &user);
@@ -448,7 +455,15 @@ fn crank_rejects_fake_percolator_program() {
 fn crank_rejects_wrong_account_count() {
     // Only 14 accounts (need exactly 15) → BadAccountCount.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     let ix = Instruction {
         program_id,

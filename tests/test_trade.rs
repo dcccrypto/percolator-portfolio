@@ -45,11 +45,11 @@
 mod common;
 
 use bytemuck::from_bytes;
-use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed, percolator_owned_slab};
+use common::{
+    assert_custom_error, fresh_env, pdas_for, percolator_owned_slab, send_init, send_signed,
+};
 use percolator_portfolio::{
-    constants::PORTFOLIO_AUTH_SEED,
-    cpi as cpi_helpers,
-    errors::PortfolioError,
+    constants::PORTFOLIO_AUTH_SEED, cpi as cpi_helpers, errors::PortfolioError,
     state::PortfolioAccount,
 };
 use solana_sdk::{
@@ -80,7 +80,13 @@ fn read_portfolio(svm: &litesvm::LiteSVM, data_pda: &Pubkey) -> PortfolioAccount
 }
 
 /// Encode a valid tag-5 Trade instruction body.
-fn trade_data(account_idx: u16, lp_idx: u16, side: u8, size_q: u64, limit_price_e6: u64) -> Vec<u8> {
+fn trade_data(
+    account_idx: u16,
+    lp_idx: u16,
+    side: u8,
+    size_q: u64,
+    limit_price_e6: u64,
+) -> Vec<u8> {
     let mut d = vec![5u8];
     d.extend_from_slice(&account_idx.to_le_bytes());
     d.extend_from_slice(&lp_idx.to_le_bytes());
@@ -273,7 +279,15 @@ fn trade_rejects_paused() {
 fn trade_rejects_unenrolled_target() {
     // Portfolio has no enrolled markets. Passing any slab → MarketNotEnrolled.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
 
     // Patch has_vault = 1 so we don't fail on vault check first.
@@ -306,7 +320,15 @@ fn trade_rejects_wrong_margin_account_count_undersupplied() {
     let slab1 = Pubkey::new_unique();
     percolator_owned_slab(&mut svm, slab1);
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     // Patch state: enrolled_count=2, has_vault=1, two enrolled markets.
     let mut acct = svm.get_account(&data_pda).unwrap();
@@ -350,7 +372,15 @@ fn trade_rejects_wrong_margin_account_count_oversupplied() {
     let slab1 = Pubkey::new_unique();
     percolator_owned_slab(&mut svm, slab1);
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     // enrolled_count=2: slab0 at idx 0, slab1 at idx 1.
     let mut acct = svm.get_account(&data_pda).unwrap();
@@ -397,9 +427,10 @@ fn trade_rejects_wrong_margin_account_count_oversupplied() {
     // depending on where the over-supply is detected.
     match res {
         Err(ref meta) => {
-            use solana_sdk::transaction::TransactionError;
             use solana_sdk::instruction::InstructionError;
-            if let TransactionError::InstructionError(_, InstructionError::Custom(code)) = meta.err {
+            use solana_sdk::transaction::TransactionError;
+            if let TransactionError::InstructionError(_, InstructionError::Custom(code)) = meta.err
+            {
                 assert!(
                     code == PortfolioError::WrongMarginAccountCount as u32
                         || code == PortfolioError::MarginSlabDuplicate as u32,
@@ -424,7 +455,15 @@ fn trade_rejects_margin_slab_not_enrolled() {
     let slab1 = Pubkey::new_unique();
     percolator_owned_slab(&mut svm, slab1);
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     let mut acct = svm.get_account(&data_pda).unwrap();
     acct.data[OFF_HAS_VAULT] = 1;
@@ -475,7 +514,15 @@ fn trade_rejects_margin_slab_duplicate() {
     let slab1 = Pubkey::new_unique();
     percolator_owned_slab(&mut svm, slab1);
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     let mut acct = svm.get_account(&data_pda).unwrap();
     acct.data[OFF_HAS_VAULT] = 1;
@@ -551,7 +598,15 @@ fn trade_rejects_fake_percolator_program() {
 fn trade_rejects_wrong_account_count_too_few() {
     // Fewer than 11 fixed accounts → BadAccountCount.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
 
     let ix = Instruction {

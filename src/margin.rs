@@ -178,23 +178,22 @@ pub fn check_aggregate_im(views: &[EnrolledView<'_>]) -> Result<(), ProgramError
         // is documented in spec §7 and replicated here exactly:
         //   notional = ceil(|basis_q| × oracle_price / POS_SCALE)
         // We use |basis_q| directly; ADL multipliers are skipped (v1).
-        let notional: u128 = if view.oracle_price_e6 == 0
-            || view.oracle_price_e6 > percolator::MAX_ORACLE_PRICE
-        {
-            // H-3: mirror engine's rejection range for oracle_price.
-            // Engine rejects price==0 OR price>MAX_ORACLE_PRICE (1e12) at
-            // notional_checked (~/percolator/src/percolator.rs:3614).
-            // Wrapper was only checking ==0; an out-of-range price above
-            // MAX inflates notional and causes a conservative-direction
-            // reject, but for the wrong reason. Align the check here.
-            return Err(PortfolioError::MarginNotionalRejected.into());
-        } else {
-            mul_div_ceil_u128(
-                basis_q.unsigned_abs(),
-                view.oracle_price_e6 as u128,
-                POS_SCALE,
-            )
-        };
+        let notional: u128 =
+            if view.oracle_price_e6 == 0 || view.oracle_price_e6 > percolator::MAX_ORACLE_PRICE {
+                // H-3: mirror engine's rejection range for oracle_price.
+                // Engine rejects price==0 OR price>MAX_ORACLE_PRICE (1e12) at
+                // notional_checked (~/percolator/src/percolator.rs:3614).
+                // Wrapper was only checking ==0; an out-of-range price above
+                // MAX inflates notional and causes a conservative-direction
+                // reject, but for the wrong reason. Align the check here.
+                return Err(PortfolioError::MarginNotionalRejected.into());
+            } else {
+                mul_div_ceil_u128(
+                    basis_q.unsigned_abs(),
+                    view.oracle_price_e6 as u128,
+                    POS_SCALE,
+                )
+            };
 
         // ── IM_req per engine spec §9.1 ───────────────────────────────
         // basis_q == 0 short-circuits to im_req = 0; else proportional
