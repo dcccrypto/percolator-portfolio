@@ -47,8 +47,7 @@ pub fn read_oracle_price_e6(
     // wrapper error instead of an SBF fault.
     // Constants: percolator_prog::constants::{HEADER_LEN, CONFIG_LEN}
     // (~/percolator-prog/src/percolator.rs:69-70).
-    let min_len =
-        percolator_prog::constants::HEADER_LEN + percolator_prog::constants::CONFIG_LEN;
+    let min_len = percolator_prog::constants::HEADER_LEN + percolator_prog::constants::CONFIG_LEN;
     if slab_data.len() < min_len {
         return Err(crate::errors::PortfolioError::MarginSlabDecodeFailed.into());
     }

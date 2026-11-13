@@ -30,7 +30,9 @@
 mod common;
 
 use bytemuck::from_bytes;
-use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed, percolator_owned_slab};
+use common::{
+    assert_custom_error, fresh_env, pdas_for, percolator_owned_slab, send_init, send_signed,
+};
 use percolator_portfolio::{
     constants::{PORTFOLIO_AUTH_SEED, PORTFOLIO_VAULT_SEED},
     cpi as cpi_helpers,
@@ -53,9 +55,7 @@ fn vault_pda(user: &Pubkey, program_id: &Pubkey) -> (Pubkey, u8) {
 
 fn read_portfolio(svm: &litesvm::LiteSVM, data_pda: &Pubkey) -> PortfolioAccount {
     let acct = svm.get_account(data_pda).unwrap();
-    *from_bytes::<PortfolioAccount>(
-        &acct.data[..core::mem::size_of::<PortfolioAccount>()],
-    )
+    *from_bytes::<PortfolioAccount>(&acct.data[..core::mem::size_of::<PortfolioAccount>()])
 }
 
 fn init_vault_ix(
@@ -98,7 +98,15 @@ fn init_vault_rejects_uninitialised_portfolio() {
 #[test]
 fn init_vault_rejects_wrong_system_program() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     let (vault, _) = vault_pda(&user.pubkey(), &program_id);
     let mint = Pubkey::new_unique();
@@ -123,7 +131,15 @@ fn init_vault_rejects_wrong_system_program() {
 #[test]
 fn init_vault_rejects_wrong_token_program() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     let (vault, _) = vault_pda(&user.pubkey(), &program_id);
     let mint = Pubkey::new_unique();
@@ -148,7 +164,15 @@ fn init_vault_rejects_wrong_token_program() {
 #[test]
 fn init_vault_rejects_wrong_auth_pda() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
     let (vault, _) = vault_pda(&user.pubkey(), &program_id);
     let mint = Pubkey::new_unique();
@@ -162,12 +186,27 @@ fn init_vault_rejects_wrong_auth_pda() {
 #[test]
 fn init_vault_rejects_wrong_vault_pda() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     let mint = Pubkey::new_unique();
     let bogus_vault = Pubkey::new_unique();
 
-    let ix = init_vault_ix(program_id, user.pubkey(), data_pda, auth_pda, bogus_vault, mint);
+    let ix = init_vault_ix(
+        program_id,
+        user.pubkey(),
+        data_pda,
+        auth_pda,
+        bogus_vault,
+        mint,
+    );
     let res = send_signed(&mut svm, ix, &user);
     assert_custom_error(res, PortfolioError::BadPda as u32);
 }
@@ -175,7 +214,15 @@ fn init_vault_rejects_wrong_vault_pda() {
 #[test]
 fn init_vault_rejects_wrong_account_count() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     let (vault, _) = vault_pda(&user.pubkey(), &program_id);
 
@@ -200,7 +247,15 @@ fn init_vault_rejects_wrong_account_count() {
 fn init_vault_rejects_extra_data_byte() {
     // InitVault body must be empty.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     let (vault, _) = vault_pda(&user.pubkey(), &program_id);
     let mint = Pubkey::new_unique();
@@ -231,7 +286,15 @@ fn init_vault_rejects_extra_data_byte() {
 #[test]
 fn deposit_rejects_when_vault_not_initialised() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     let (vault, _) = vault_pda(&user.pubkey(), &program_id);
@@ -277,7 +340,15 @@ fn deposit_rejects_when_vault_not_initialised() {
 #[test]
 fn deposit_rejects_wrong_account_count() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     // Pass only 5 accounts (need 11).
     let mut data = vec![3u8];
@@ -301,7 +372,15 @@ fn deposit_rejects_wrong_account_count() {
 #[test]
 fn withdraw_rejects_when_paused() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
     // Pause first.
@@ -491,7 +570,15 @@ fn emergency_close_rejects_unenrolled_market() {
     // pass the canonical percolator program, and assert MarketNotEnrolled
     // fires before the CPI.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     let (vault, vbump) = vault_pda(&user.pubkey(), &program_id);
@@ -531,7 +618,15 @@ fn emergency_close_rejects_unenrolled_market() {
 #[test]
 fn emergency_close_rejects_wrong_account_count() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     let mut data = vec![7u8];
     data.extend_from_slice(&0u16.to_le_bytes());
@@ -559,7 +654,15 @@ fn deposit_rejects_unenrolled_market_after_vault_init() {
     // manually patch the vault_bump in the data PDA and verify that the
     // wrapper STILL rejects on the enrolment check.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     let (vault, vbump) = vault_pda(&user.pubkey(), &program_id);
@@ -606,13 +709,18 @@ fn init_vault_happy_path_actually_creates_vault() {
     // is correctly owned by SPL Token, has the right mint, has zero
     // balance, has its `account.owner` set to the portfolio_auth PDA,
     // and that the portfolio's `vault_bump` field is populated.
-    use solana_sdk::{
-        program_pack::Pack, system_instruction,
-        sysvar::rent::Rent,
-    };
+    use solana_sdk::{program_pack::Pack, system_instruction, sysvar::rent::Rent};
 
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     let (vault, _vbump) = vault_pda(&user.pubkey(), &program_id);
@@ -647,7 +755,14 @@ fn init_vault_happy_path_actually_creates_vault() {
 
     // Now call InitVault.
     svm.expire_blockhash();
-    let ix = init_vault_ix(program_id, user.pubkey(), data_pda, auth_pda, vault, mint_kp.pubkey());
+    let ix = init_vault_ix(
+        program_id,
+        user.pubkey(),
+        data_pda,
+        auth_pda,
+        vault,
+        mint_kp.pubkey(),
+    );
     send_signed(&mut svm, ix, &user).expect("init_vault must succeed");
 
     // Verify the vault token account is real.
@@ -666,7 +781,10 @@ fn init_vault_happy_path_actually_creates_vault() {
     let token_state = spl_token::state::Account::unpack(&vault_acct.data)
         .expect("vault data is a valid SPL Token Account");
     assert_eq!(token_state.mint, mint_kp.pubkey(), "vault mint set");
-    assert_eq!(token_state.owner, auth_pda, "vault owner = portfolio_auth PDA");
+    assert_eq!(
+        token_state.owner, auth_pda,
+        "vault owner = portfolio_auth PDA"
+    );
     assert_eq!(token_state.amount, 0, "vault balance starts at 0");
 
     // Verify the portfolio's vault_bump was populated.
@@ -685,7 +803,15 @@ fn deposit_rejects_fake_percolator_program() {
     // a_percolator_prog must be rejected with `BadProgram`. v0.1 would
     // have routed Deposit's CPI to the attacker's program.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     let (vault, vbump) = vault_pda(&user.pubkey(), &program_id);
@@ -729,7 +855,15 @@ fn deposit_rejects_zero_amount() {
     // which rejects with a generic InvalidArgument. Now caught earlier
     // with `ZeroAmount`.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     let (vault, _) = vault_pda(&user.pubkey(), &program_id);
@@ -763,7 +897,15 @@ fn deposit_rejects_zero_amount() {
 #[test]
 fn withdraw_rejects_zero_amount() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     let (vault, _) = vault_pda(&user.pubkey(), &program_id);
@@ -904,7 +1046,15 @@ fn portfolio_account_layout_has_vault_bump_at_offset_112() {
     // canonical PDA bump and can legitimately be 0 post-InitVault for
     // ~1/256 users.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
     let pa = read_portfolio(&svm, &data_pda);

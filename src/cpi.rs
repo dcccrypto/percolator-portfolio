@@ -245,8 +245,8 @@ pub fn percolator_trade_cpi(
 /// Hardcoded here so we don't need an spl-token import in the processor's
 /// hot paths; the wrapper only needs to verify byte equality.
 pub const SPL_TOKEN_ID: [u8; 32] = [
-    6, 221, 246, 225, 215, 101, 161, 147, 217, 203, 225, 70, 206, 235, 121, 172, 28, 180, 133,
-    237, 95, 91, 55, 145, 58, 140, 245, 133, 126, 255, 0, 169,
+    6, 221, 246, 225, 215, 101, 161, 147, 217, 203, 225, 70, 206, 235, 121, 172, 28, 180, 133, 237,
+    95, 91, 55, 145, 58, 140, 245, 133, 126, 255, 0, 169,
 ];
 
 /// `percolator-prog` program ID (`ESa89R5Es3rJ5mnwGybVRG1GrNt9etP11Z5V2QWD4edv`).
@@ -259,8 +259,8 @@ pub const SPL_TOKEN_ID: [u8; 32] = [
 /// Source: `~/percolator-prog/src/percolator.rs:40`.
 /// Verified: bytes match `Pubkey::from_str("ESa89R5...").to_bytes()`.
 pub const PERCOLATOR_PROGRAM_ID: [u8; 32] = [
-    199, 180, 231, 28, 169, 127, 223, 6, 13, 64, 223, 31, 229, 237, 183, 2, 182, 201, 78, 87,
-    235, 180, 40, 205, 87, 58, 38, 116, 241, 27, 43, 41,
+    199, 180, 231, 28, 169, 127, 223, 6, 13, 64, 223, 31, 229, 237, 183, 2, 182, 201, 78, 87, 235,
+    180, 40, 205, 87, 58, 38, 116, 241, 27, 43, 41,
 ];
 
 /// SPL Token `Transfer` (tag 3 in spl-token v3 / v4).

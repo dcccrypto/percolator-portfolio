@@ -279,8 +279,7 @@ pub mod state {
     const _: () = assert!(core::mem::align_of::<MarketSlot>() == 8);
     // B10: pin the array footprint so silent drift in either constant is a
     // build error.
-    const _: () =
-        assert!(MAX_ENROLLED_MARKETS * core::mem::size_of::<MarketSlot>() == 768);
+    const _: () = assert!(MAX_ENROLLED_MARKETS * core::mem::size_of::<MarketSlot>() == 768);
 
     /// On-chain state for a single user's portfolio.
     /// PDA seeds: `[PORTFOLIO_SEED, user_pubkey]`.
@@ -359,7 +358,6 @@ pub mod state {
         //   CommitUpdateConfig  (tag 15): applies pending if current_slot >= commit_slot.
         // MIN_CONFIG_TIMELOCK_SLOTS = 50 (~20s devnet / ~20s mainnet at 400ms).
         // See processor::request_update_config / commit_update_config.
-
         /// Slot after which CommitUpdateConfig is accepted. Zero = no pending update.
         pub pending_commit_slot: u64,
         /// Pending max_leverage_bps (applied on commit). Zero = use current.
@@ -413,12 +411,11 @@ pub mod state {
         "PortfolioAccount should fit comfortably in a single allocation"
     );
     // A-3: verify the new pending-fields block is exactly 48 bytes (8+4+2+2+32).
-    const _PENDING_BLOCK_SIZE: usize =
-        core::mem::size_of::<u64>()   // pending_commit_slot
+    const _PENDING_BLOCK_SIZE: usize = core::mem::size_of::<u64>()   // pending_commit_slot
         + core::mem::size_of::<u32>() // pending_max_leverage_bps
         + core::mem::size_of::<u16>() // pending_buffer_bps
         + 2                           // _pad1
-        + 32;                         // pending_keeper
+        + 32; // pending_keeper
     const _: () = assert!(_PENDING_BLOCK_SIZE == 48);
 }
 
@@ -451,9 +448,7 @@ pub mod instruction {
         /// lands, enrollment can only target a freshly-initialized
         /// percolator account whose owner was set to `portfolio_auth` at
         /// `InitUser` time.
-        EnrollMarket {
-            account_idx: u16,
-        },
+        EnrollMarket { account_idx: u16 },
 
         /// Tag 2. Removes the (market, account_idx) slot from the
         /// portfolio's `enrolled[]` table via swap-remove. Local-only:
@@ -464,15 +459,10 @@ pub mod instruction {
         /// `portfolio_auth` after Unenroll. Rejected if the underlying
         /// account still carries capital, an open position, or
         /// unreleased PnL (see `CannotUnenrollWithBalance`).
-        UnenrollMarket {
-            account_idx: u16,
-        },
+        UnenrollMarket { account_idx: u16 },
 
         /// Tag 3. User deposits collateral into a specific enrolled market.
-        Deposit {
-            account_idx: u16,
-            amount: u64,
-        },
+        Deposit { account_idx: u16, amount: u64 },
 
         /// Tag 4. User withdraws collateral from an enrolled market.
         /// Per-market IM is enforced engine-side at the underlying
@@ -481,10 +471,7 @@ pub mod instruction {
         /// requires an upstream `GetAccountHealth` CPI which is not yet
         /// exposed; until it lands, callers should pair Withdraw with
         /// Rebalance / RebalanceCrank as needed.
-        Withdraw {
-            account_idx: u16,
-            amount: u64,
-        },
+        Withdraw { account_idx: u16, amount: u64 },
 
         /// Tag 5. User opens / modifies a position on an enrolled market via
         /// percolator-prog::TradeCpi. The wrapper signs as `portfolio_auth`
@@ -516,9 +503,7 @@ pub mod instruction {
         /// Tag 7. User-controlled escape hatch. Forces a position close on
         /// `account_idx` regardless of portfolio health. For when the user
         /// wants out and doesn't trust the keeper to coordinate.
-        EmergencyClose {
-            account_idx: u16,
-        },
+        EmergencyClose { account_idx: u16 },
 
         /// Tag 8. Update buffer / leverage / keeper.
         UpdateConfig {
@@ -529,9 +514,7 @@ pub mod instruction {
 
         /// Tag 9. Toggle `paused`. While paused, Rebalance is rejected;
         /// user-signed actions still work.
-        SetPaused {
-            paused: bool,
-        },
+        SetPaused { paused: bool },
 
         /// Tag 10. Lazily create the user's `portfolio_vault` token account.
         /// Costs ~15K CU and ~rent-min lamports. Required before any
@@ -566,10 +549,7 @@ pub mod instruction {
         ///
         /// `fee_payment` must exceed the market's `new_account_fee`; the
         /// engine splits it into (insurance fee) + (initial capital).
-        EnrollMarketAndInit {
-            expected_idx: u16,
-            fee_payment: u64,
-        },
+        EnrollMarketAndInit { expected_idx: u16, fee_payment: u64 },
 
         /// Tag 13. Permissionless rebalance crank — Defense 3 of soft+
         /// cross-margin. ANY signer can call this to move collateral
@@ -639,8 +619,7 @@ pub mod instruction {
                         return Err(PortfolioError::BadInstruction.into());
                     }
                     let buffer_bps = u16::from_le_bytes([body[0], body[1]]);
-                    let max_leverage_bps =
-                        u32::from_le_bytes([body[2], body[3], body[4], body[5]]);
+                    let max_leverage_bps = u32::from_le_bytes([body[2], body[3], body[4], body[5]]);
                     let mut keeper = [0u8; 32];
                     keeper.copy_from_slice(&body[6..38]);
                     Ok(Instruction::InitPortfolio {
@@ -675,7 +654,10 @@ pub mod instruction {
                     let amount = u64::from_le_bytes([
                         body[2], body[3], body[4], body[5], body[6], body[7], body[8], body[9],
                     ]);
-                    Ok(Instruction::Deposit { account_idx, amount })
+                    Ok(Instruction::Deposit {
+                        account_idx,
+                        amount,
+                    })
                 }
                 4 => {
                     if body.len() != 2 + 8 {
@@ -685,7 +667,10 @@ pub mod instruction {
                     let amount = u64::from_le_bytes([
                         body[2], body[3], body[4], body[5], body[6], body[7], body[8], body[9],
                     ]);
-                    Ok(Instruction::Withdraw { account_idx, amount })
+                    Ok(Instruction::Withdraw {
+                        account_idx,
+                        amount,
+                    })
                 }
                 5 => {
                     // Trade body: u16 account_idx | u16 lp_idx | u8 side |
@@ -751,8 +736,7 @@ pub mod instruction {
                         return Err(PortfolioError::BadInstruction.into());
                     }
                     let buffer_bps = u16::from_le_bytes([body[0], body[1]]);
-                    let max_leverage_bps =
-                        u32::from_le_bytes([body[2], body[3], body[4], body[5]]);
+                    let max_leverage_bps = u32::from_le_bytes([body[2], body[3], body[4], body[5]]);
                     let mut keeper = [0u8; 32];
                     keeper.copy_from_slice(&body[6..38]);
                     Ok(Instruction::UpdateConfig {
@@ -822,8 +806,7 @@ pub mod instruction {
                         return Err(PortfolioError::BadInstruction.into());
                     }
                     let buffer_bps = u16::from_le_bytes([body[0], body[1]]);
-                    let max_leverage_bps =
-                        u32::from_le_bytes([body[2], body[3], body[4], body[5]]);
+                    let max_leverage_bps = u32::from_le_bytes([body[2], body[3], body[4], body[5]]);
                     let mut keeper = [0u8; 32];
                     keeper.copy_from_slice(&body[6..38]);
                     Ok(Instruction::RequestUpdateConfig {
@@ -909,14 +892,12 @@ pub mod processor {
     /// SPL Token v3 account size, as a u64 for `system_instruction::create_account`.
     /// The `usize` form lives in `crate::constants::SPL_TOKEN_ACCOUNT_LEN`.
     /// Both must remain at 165.
-    const SPL_TOKEN_ACCOUNT_LEN: u64 =
-        crate::constants::SPL_TOKEN_ACCOUNT_LEN as u64;
+    const SPL_TOKEN_ACCOUNT_LEN: u64 = crate::constants::SPL_TOKEN_ACCOUNT_LEN as u64;
     const _: () = assert!(SPL_TOKEN_ACCOUNT_LEN == 165);
     /// SPL Token Program ID (`TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`).
     const SPL_TOKEN_PROGRAM: Pubkey = Pubkey::new_from_array(cpi_helpers::SPL_TOKEN_ID);
     /// `percolator-prog` Program ID. See `cpi.rs` for derivation.
-    const PERCOLATOR_PROGRAM: Pubkey =
-        Pubkey::new_from_array(cpi_helpers::PERCOLATOR_PROGRAM_ID);
+    const PERCOLATOR_PROGRAM: Pubkey = Pubkey::new_from_array(cpi_helpers::PERCOLATOR_PROGRAM_ID);
 
     /// P-CRITICAL fix: every site that CPIs into percolator-prog must verify
     /// the supplied executable account is the canonical program. Without
@@ -1004,12 +985,14 @@ pub mod processor {
             }
             Instruction::InitVault => init_vault(program_id, accounts),
             Instruction::ClosePortfolio => close_portfolio(program_id, accounts),
-            Instruction::Deposit { account_idx, amount } => {
-                deposit(program_id, accounts, account_idx, amount)
-            }
-            Instruction::Withdraw { account_idx, amount } => {
-                withdraw(program_id, accounts, account_idx, amount)
-            }
+            Instruction::Deposit {
+                account_idx,
+                amount,
+            } => deposit(program_id, accounts, account_idx, amount),
+            Instruction::Withdraw {
+                account_idx,
+                amount,
+            } => withdraw(program_id, accounts, account_idx, amount),
             Instruction::Rebalance { leg_count } => {
                 rebalance(program_id, accounts, leg_count, data)
             }
@@ -1208,11 +1191,7 @@ pub mod processor {
         Ok(())
     }
 
-    fn set_paused(
-        program_id: &Pubkey,
-        accounts: &[AccountInfo],
-        paused: bool,
-    ) -> ProgramResult {
+    fn set_paused(program_id: &Pubkey, accounts: &[AccountInfo], paused: bool) -> ProgramResult {
         // Accounts:
         //   0. [signer]   user
         //   1. [writable] portfolio data PDA
@@ -1268,7 +1247,11 @@ pub mod processor {
             pa.auth_bump
         };
         let expected_auth = Pubkey::create_program_address(
-            &[PORTFOLIO_AUTH_SEED, a_user.key.as_ref(), &[auth_bump_for_m3]],
+            &[
+                PORTFOLIO_AUTH_SEED,
+                a_user.key.as_ref(),
+                &[auth_bump_for_m3],
+            ],
             program_id,
         )
         .map_err(|_| PortfolioError::BadPda)?;
@@ -1328,8 +1311,7 @@ pub mod processor {
         // unambiguous.
         let market_bytes = a_market.key.to_bytes();
         for i in 0..count {
-            if pa.enrolled[i].market == market_bytes
-            {
+            if pa.enrolled[i].market == market_bytes {
                 return Err(PortfolioError::MarketAlreadyEnrolled.into());
             }
         }
@@ -1434,8 +1416,7 @@ pub mod processor {
             if pa.enrolled_count as usize >= crate::constants::MAX_ENROLLED_MARKETS {
                 return Err(PortfolioError::TooManyEnrolled.into());
             }
-            let count = (pa.enrolled_count as usize)
-                .min(crate::constants::MAX_ENROLLED_MARKETS);
+            let count = (pa.enrolled_count as usize).min(crate::constants::MAX_ENROLLED_MARKETS);
             // CRIT-6: reject ANY duplicate of `market`. Defense 1 cannot
             // disambiguate two accounts on the same market.
             let market_bytes = a_slab.key.to_bytes();
@@ -1456,8 +1437,8 @@ pub mod processor {
                 return Err(PortfolioError::BadMint.into());
             }
             let slab_data = a_slab.try_borrow_data()?;
-            let min_len = percolator_prog::constants::HEADER_LEN
-                + percolator_prog::constants::CONFIG_LEN;
+            let min_len =
+                percolator_prog::constants::HEADER_LEN + percolator_prog::constants::CONFIG_LEN;
             if slab_data.len() < min_len {
                 return Err(PortfolioError::MarginSlabDecodeFailed.into());
             }
@@ -1478,8 +1459,12 @@ pub mod processor {
         // (set up at InitVault), so the engine's verify_token_account
         // check on (vault.owner == a_user signer) passes when a_user is
         // also portfolio_auth via invoke_signed.
-        let transfer_ix =
-            cpi_helpers::spl_token_transfer(*a_user_ata.key, *a_vault.key, *a_user.key, fee_payment);
+        let transfer_ix = cpi_helpers::spl_token_transfer(
+            *a_user_ata.key,
+            *a_vault.key,
+            *a_user.key,
+            fee_payment,
+        );
         invoke(
             &transfer_ix,
             &[
@@ -1667,7 +1652,11 @@ pub mod processor {
             has_vault = pa.has_vault != 0;
             user_pubkey_bytes = pa.owner;
             // A-6: zero means "not yet configured" → use v1 defaults.
-            crank_bounty_bps_cfg = if pa.crank_bounty_bps == 0 { 100 } else { pa.crank_bounty_bps };
+            crank_bounty_bps_cfg = if pa.crank_bounty_bps == 0 {
+                100
+            } else {
+                pa.crank_bounty_bps
+            };
             crank_bounty_cap_e6_cfg = if pa.crank_bounty_cap_e6 == 0 {
                 1_000_000
             } else {
@@ -1857,9 +1846,7 @@ pub mod processor {
         // unpack against the cached vault data.
         // A-6: use per-portfolio configurable bounty params (crank_bounty_bps_cfg,
         // crank_bounty_cap_e6_cfg) read from pa above. Defaults: 100bps/1_000_000 e6.
-        let bounty_raw = amount
-            .saturating_mul(crank_bounty_bps_cfg as u64)
-            / 10_000;
+        let bounty_raw = amount.saturating_mul(crank_bounty_bps_cfg as u64) / 10_000;
         let bounty = core::cmp::min(bounty_raw, crank_bounty_cap_e6_cfg);
         if bounty > 0 {
             let vault_amount = read_token_account_amount(a_vault)?;
@@ -1947,12 +1934,8 @@ pub mod processor {
         // `bounty` was computed and validated above (CRIT-2 + H-1
         // pre-checks). Bounty signer is portfolio_auth via PDA.
         if bounty > 0 {
-            let bounty_ix = cpi_helpers::spl_token_transfer(
-                *a_vault.key,
-                *a_payout.key,
-                *a_auth.key,
-                bounty,
-            );
+            let bounty_ix =
+                cpi_helpers::spl_token_transfer(*a_vault.key, *a_payout.key, *a_auth.key, bounty);
             invoke_signed(
                 &bounty_ix,
                 &[
@@ -2088,8 +2071,7 @@ pub mod processor {
         // indexing and an SBF panic — recoverable DOS, not fund loss, but
         // still a correctness gap. find_enrolled is the hottest helper;
         // every Trade / Rebalance / Crank goes through here.
-        let count = (pa.enrolled_count as usize)
-            .min(crate::constants::MAX_ENROLLED_MARKETS);
+        let count = (pa.enrolled_count as usize).min(crate::constants::MAX_ENROLLED_MARKETS);
         let market_bytes = market.to_bytes();
         for i in 0..count {
             if pa.enrolled[i].market == market_bytes && pa.enrolled[i].account_idx == idx {
@@ -2224,10 +2206,8 @@ pub mod processor {
         }
 
         // Derive vault PDA fresh (we don't have a stored bump yet).
-        let (vault_pda, vault_bump) = Pubkey::find_program_address(
-            &[PORTFOLIO_VAULT_SEED, a_user.key.as_ref()],
-            program_id,
-        );
+        let (vault_pda, vault_bump) =
+            Pubkey::find_program_address(&[PORTFOLIO_VAULT_SEED, a_user.key.as_ref()], program_id);
         if vault_pda != *a_vault.key {
             return Err(PortfolioError::BadPda.into());
         }
@@ -2255,11 +2235,8 @@ pub mod processor {
 
         // initialize_account3: token account + mint + authority. The
         // authority is the portfolio_auth PDA (NOT the vault PDA itself).
-        let init_ix = cpi_helpers::spl_token_initialize_account3(
-            *a_vault.key,
-            *a_mint.key,
-            *a_auth.key,
-        );
+        let init_ix =
+            cpi_helpers::spl_token_initialize_account3(*a_vault.key, *a_mint.key, *a_auth.key);
         invoke(
             &init_ix,
             &[a_vault.clone(), a_mint.clone(), a_token.clone()],
@@ -2359,16 +2336,18 @@ pub mod processor {
             }
 
             // CPI spl_token::CloseAccount, dest = user (gets the rent).
-            let close_ix = cpi_helpers::spl_token_close_account(
-                *a_vault.key,
-                *a_user.key,
-                *a_auth.key,
-            );
+            let close_ix =
+                cpi_helpers::spl_token_close_account(*a_vault.key, *a_user.key, *a_auth.key);
             let user_seed = a_user.key.as_ref();
             let auth_seeds: &[&[u8]] = &[PORTFOLIO_AUTH_SEED, user_seed, &[auth_bump]];
             invoke_signed(
                 &close_ix,
-                &[a_vault.clone(), a_user.clone(), a_auth.clone(), a_token.clone()],
+                &[
+                    a_vault.clone(),
+                    a_user.clone(),
+                    a_auth.clone(),
+                    a_token.clone(),
+                ],
                 &[auth_seeds],
             )?;
         }
@@ -2494,8 +2473,8 @@ pub mod processor {
             let slab_data = a_slab.try_borrow_data()?;
             // read_config panics on under-length; pyth::read_oracle_price_e6
             // already guards HEADER+CONFIG but here we guard inline.
-            let min_len = percolator_prog::constants::HEADER_LEN
-                + percolator_prog::constants::CONFIG_LEN;
+            let min_len =
+                percolator_prog::constants::HEADER_LEN + percolator_prog::constants::CONFIG_LEN;
             if slab_data.len() < min_len {
                 return Err(PortfolioError::MarginSlabDecodeFailed.into());
             }
@@ -2835,8 +2814,7 @@ pub mod processor {
         // leg_count × 12 bytes.
         let body = &ix_data[1..]; // skip tag
         let legs_data = &body[1..]; // skip leg_count
-        let auth_seeds: &[&[u8]] =
-            &[PORTFOLIO_AUTH_SEED, user_pubkey.as_ref(), &[auth_bump]];
+        let auth_seeds: &[&[u8]] = &[PORTFOLIO_AUTH_SEED, user_pubkey.as_ref(), &[auth_bump]];
 
         for i in 0..(leg_count as usize) {
             let off = i * 12;
@@ -3050,8 +3028,8 @@ pub mod processor {
                 return Err(PortfolioError::MarketNotEnrolled.into());
             }
             // CRIT-5: clamp loop bound. See find_enrolled for rationale.
-            enrolled_count = (pa.enrolled_count as usize)
-                .min(crate::constants::MAX_ENROLLED_MARKETS);
+            enrolled_count =
+                (pa.enrolled_count as usize).min(crate::constants::MAX_ENROLLED_MARKETS);
             let mut pairs = alloc::vec::Vec::with_capacity(enrolled_count);
             for i in 0..enrolled_count {
                 pairs.push((pa.enrolled[i].market, pa.enrolled[i].account_idx));
@@ -3362,8 +3340,7 @@ pub mod processor {
         let slot_idx = {
             let data = a_data.try_borrow_data()?;
             let pa: &PortfolioAccount = bytemuck::from_bytes(&data[..POOL_SIZE]);
-            find_enrolled(pa, a_slab.key, account_idx)
-                .ok_or(PortfolioError::MarketNotEnrolled)?
+            find_enrolled(pa, a_slab.key, account_idx).ok_or(PortfolioError::MarketNotEnrolled)?
         };
 
         // Verify vault PDA derivation matches stored bump.
@@ -3447,8 +3424,7 @@ pub mod processor {
         let pa: &mut PortfolioAccount = from_bytes_mut(&mut data[..POOL_SIZE]);
         // CRIT-5: clamp before using as index. slot_idx was already
         // verified < count by the earlier find_enrolled call.
-        let count = (pa.enrolled_count as usize)
-            .min(crate::constants::MAX_ENROLLED_MARKETS);
+        let count = (pa.enrolled_count as usize).min(crate::constants::MAX_ENROLLED_MARKETS);
         if count == 0 {
             return Err(PortfolioError::MarketNotEnrolled.into());
         }
@@ -3574,8 +3550,7 @@ pub mod processor {
         let pa: &mut PortfolioAccount = from_bytes_mut(&mut data[..POOL_SIZE]);
 
         // CRIT-5: clamp loop bound.
-        let count = (pa.enrolled_count as usize)
-            .min(crate::constants::MAX_ENROLLED_MARKETS);
+        let count = (pa.enrolled_count as usize).min(crate::constants::MAX_ENROLLED_MARKETS);
         if count == 0 {
             return Err(PortfolioError::MarketNotEnrolled.into());
         }
@@ -3583,9 +3558,7 @@ pub mod processor {
 
         let mut found: Option<usize> = None;
         for i in 0..count {
-            if pa.enrolled[i].market == market_bytes
-                && pa.enrolled[i].account_idx == account_idx
-            {
+            if pa.enrolled[i].market == market_bytes && pa.enrolled[i].account_idx == account_idx {
                 found = Some(i);
                 break;
             }

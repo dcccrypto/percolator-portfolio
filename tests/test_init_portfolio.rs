@@ -31,8 +31,7 @@ fn init_portfolio_happy_path() {
     let acct = svm.get_account(&data_pda).expect("data PDA must exist");
     assert_eq!(acct.owner, program_id);
 
-    let pa: &PortfolioAccount =
-        from_bytes(&acct.data[..core::mem::size_of::<PortfolioAccount>()]);
+    let pa: &PortfolioAccount = from_bytes(&acct.data[..core::mem::size_of::<PortfolioAccount>()]);
     assert_eq!(pa.magic, MAGIC);
     assert_eq!(pa.owner, user.pubkey().to_bytes());
     assert_eq!(pa.bump, data_bump);
@@ -60,18 +59,39 @@ fn init_rejects_double_init() {
     // are enough) — otherwise Solana's tx-level dedup returns
     // `AlreadyProcessed` before our handler runs, masking the real check.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique())
-        .expect("first init");
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .expect("first init");
     // Advance the blockhash so the second tx isn't a hash collision.
     svm.expire_blockhash();
-    let res = send_init(&mut svm, program_id, &user, 300, 60_000, Pubkey::new_unique());
+    let res = send_init(
+        &mut svm,
+        program_id,
+        &user,
+        300,
+        60_000,
+        Pubkey::new_unique(),
+    );
     assert_custom_error(res, PortfolioError::AccountAlreadyInitialized as u32);
 }
 
 #[test]
 fn init_rejects_buffer_too_low() {
     let (mut svm, program_id, user) = fresh_env();
-    let res = send_init(&mut svm, program_id, &user, 50, 50_000, Pubkey::new_unique());
+    let res = send_init(
+        &mut svm,
+        program_id,
+        &user,
+        50,
+        50_000,
+        Pubkey::new_unique(),
+    );
     assert_custom_error(res, PortfolioError::BufferOutOfRange as u32);
 }
 
@@ -79,7 +99,14 @@ fn init_rejects_buffer_too_low() {
 fn init_rejects_buffer_at_min_minus_one() {
     // Boundary: MIN_BUFFER_BPS - 1 = 99 must be rejected.
     let (mut svm, program_id, user) = fresh_env();
-    let res = send_init(&mut svm, program_id, &user, 99, 50_000, Pubkey::new_unique());
+    let res = send_init(
+        &mut svm,
+        program_id,
+        &user,
+        99,
+        50_000,
+        Pubkey::new_unique(),
+    );
     assert_custom_error(res, PortfolioError::BufferOutOfRange as u32);
 }
 
@@ -90,33 +117,52 @@ fn init_accepts_buffer_at_min() {
     // didn't error — that wouldn't catch a bug where init silently
     // clamped the value.)
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 100, 50_000, Pubkey::new_unique())
-        .expect("buffer=MIN must succeed");
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        100,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .expect("buffer=MIN must succeed");
 
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
     let acct = svm.get_account(&data_pda).unwrap();
-    let pa: &PortfolioAccount =
-        from_bytes(&acct.data[..core::mem::size_of::<PortfolioAccount>()]);
+    let pa: &PortfolioAccount = from_bytes(&acct.data[..core::mem::size_of::<PortfolioAccount>()]);
     assert_eq!(pa.buffer_bps, 100, "boundary value actually stored");
 }
 
 #[test]
 fn init_accepts_buffer_at_max() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 5_000, 50_000, Pubkey::new_unique())
-        .expect("buffer=MAX must succeed");
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        5_000,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .expect("buffer=MAX must succeed");
 
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
     let acct = svm.get_account(&data_pda).unwrap();
-    let pa: &PortfolioAccount =
-        from_bytes(&acct.data[..core::mem::size_of::<PortfolioAccount>()]);
+    let pa: &PortfolioAccount = from_bytes(&acct.data[..core::mem::size_of::<PortfolioAccount>()]);
     assert_eq!(pa.buffer_bps, 5_000, "boundary value actually stored");
 }
 
 #[test]
 fn init_rejects_buffer_too_high() {
     let (mut svm, program_id, user) = fresh_env();
-    let res = send_init(&mut svm, program_id, &user, 6_000, 50_000, Pubkey::new_unique());
+    let res = send_init(
+        &mut svm,
+        program_id,
+        &user,
+        6_000,
+        50_000,
+        Pubkey::new_unique(),
+    );
     assert_custom_error(res, PortfolioError::BufferOutOfRange as u32);
 }
 
@@ -130,7 +176,14 @@ fn init_rejects_zero_leverage() {
 #[test]
 fn init_rejects_leverage_above_ceiling() {
     let (mut svm, program_id, user) = fresh_env();
-    let res = send_init(&mut svm, program_id, &user, 200, 200_000, Pubkey::new_unique());
+    let res = send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        200_000,
+        Pubkey::new_unique(),
+    );
     assert_custom_error(res, PortfolioError::LeverageOutOfRange as u32);
 }
 
@@ -139,14 +192,23 @@ fn init_accepts_leverage_at_ceiling() {
     // Boundary: MAX_PORTFOLIO_LEV_BPS = 100_000 must succeed AND the
     // value must be stored.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 100_000, Pubkey::new_unique())
-        .expect("max_lev=ceiling must succeed");
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        100_000,
+        Pubkey::new_unique(),
+    )
+    .expect("max_lev=ceiling must succeed");
 
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
     let acct = svm.get_account(&data_pda).unwrap();
-    let pa: &PortfolioAccount =
-        from_bytes(&acct.data[..core::mem::size_of::<PortfolioAccount>()]);
-    assert_eq!(pa.max_leverage_bps, 100_000, "boundary value actually stored");
+    let pa: &PortfolioAccount = from_bytes(&acct.data[..core::mem::size_of::<PortfolioAccount>()]);
+    assert_eq!(
+        pa.max_leverage_bps, 100_000,
+        "boundary value actually stored"
+    );
 }
 
 #[test]

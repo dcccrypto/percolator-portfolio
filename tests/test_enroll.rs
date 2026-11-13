@@ -7,11 +7,11 @@
 mod common;
 
 use bytemuck::from_bytes;
-use common::{assert_custom_error, fresh_env, pdas_for, percolator_owned_slab, send_init, send_signed};
+use common::{
+    assert_custom_error, fresh_env, pdas_for, percolator_owned_slab, send_init, send_signed,
+};
 use percolator_portfolio::{
-    constants::MAX_ENROLLED_MARKETS,
-    errors::PortfolioError,
-    state::PortfolioAccount,
+    constants::MAX_ENROLLED_MARKETS, errors::PortfolioError, state::PortfolioAccount,
 };
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
@@ -21,9 +21,7 @@ use solana_sdk::{
 
 fn read_portfolio(svm: &litesvm::LiteSVM, data_pda: &Pubkey) -> PortfolioAccount {
     let acct = svm.get_account(data_pda).unwrap();
-    *from_bytes::<PortfolioAccount>(
-        &acct.data[..core::mem::size_of::<PortfolioAccount>()],
-    )
+    *from_bytes::<PortfolioAccount>(&acct.data[..core::mem::size_of::<PortfolioAccount>()])
 }
 
 fn enroll_ix(
@@ -45,7 +43,6 @@ fn enroll_ix(
         data,
     }
 }
-
 
 fn unenroll_ix(
     program_id: Pubkey,
@@ -74,12 +71,25 @@ fn unenroll_ix(
 #[test]
 fn enroll_appends_to_empty_slot_zero() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let market = Pubkey::new_unique();
     percolator_owned_slab(&mut svm, market);
-    send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, market, 7), &user).unwrap();
+    send_signed(
+        &mut svm,
+        enroll_ix(program_id, &user, data_pda, market, 7),
+        &user,
+    )
+    .unwrap();
 
     let pa = read_portfolio(&svm, &data_pda);
     assert_eq!(pa.enrolled_count, 1);
@@ -96,7 +106,15 @@ fn enroll_appends_to_empty_slot_zero() {
 #[test]
 fn enroll_appends_in_order() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let m1 = Pubkey::new_unique();
@@ -105,11 +123,26 @@ fn enroll_appends_in_order() {
     percolator_owned_slab(&mut svm, m2);
     let m3 = Pubkey::new_unique();
     percolator_owned_slab(&mut svm, m3);
-    send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, m1, 1), &user).unwrap();
+    send_signed(
+        &mut svm,
+        enroll_ix(program_id, &user, data_pda, m1, 1),
+        &user,
+    )
+    .unwrap();
     svm.expire_blockhash();
-    send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, m2, 2), &user).unwrap();
+    send_signed(
+        &mut svm,
+        enroll_ix(program_id, &user, data_pda, m2, 2),
+        &user,
+    )
+    .unwrap();
     svm.expire_blockhash();
-    send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, m3, 3), &user).unwrap();
+    send_signed(
+        &mut svm,
+        enroll_ix(program_id, &user, data_pda, m3, 3),
+        &user,
+    )
+    .unwrap();
 
     let pa = read_portfolio(&svm, &data_pda);
     assert_eq!(pa.enrolled_count, 3);
@@ -124,18 +157,38 @@ fn enroll_appends_in_order() {
 #[test]
 fn enroll_rejects_duplicate_market_and_idx() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let market = Pubkey::new_unique();
     percolator_owned_slab(&mut svm, market);
-    send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, market, 5), &user).unwrap();
+    send_signed(
+        &mut svm,
+        enroll_ix(program_id, &user, data_pda, market, 5),
+        &user,
+    )
+    .unwrap();
     svm.expire_blockhash();
-    let res = send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, market, 5), &user);
+    let res = send_signed(
+        &mut svm,
+        enroll_ix(program_id, &user, data_pda, market, 5),
+        &user,
+    );
     assert_custom_error(res, PortfolioError::MarketAlreadyEnrolled as u32);
 
     let pa = read_portfolio(&svm, &data_pda);
-    assert_eq!(pa.enrolled_count, 1, "duplicate enrol must not increment count");
+    assert_eq!(
+        pa.enrolled_count, 1,
+        "duplicate enrol must not increment count"
+    );
 }
 
 #[test]
@@ -146,35 +199,67 @@ fn enroll_rejects_same_market_different_idx() {
     // (slab, idx)-joint matching there. The product decision is to keep
     // Defense 1 simple and forbid the configuration at enrollment.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let market = Pubkey::new_unique();
     percolator_owned_slab(&mut svm, market);
-    send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, market, 5), &user).unwrap();
+    send_signed(
+        &mut svm,
+        enroll_ix(program_id, &user, data_pda, market, 5),
+        &user,
+    )
+    .unwrap();
     svm.expire_blockhash();
     // Same market, different idx → rejected with MarketAlreadyEnrolled.
-    let res = send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, market, 6), &user);
+    let res = send_signed(
+        &mut svm,
+        enroll_ix(program_id, &user, data_pda, market, 6),
+        &user,
+    );
     assert!(res.is_err(), "second enrol on same market must reject");
     assert_custom_error(res, PortfolioError::MarketAlreadyEnrolled as u32);
 
     let pa = read_portfolio(&svm, &data_pda);
-    assert_eq!(pa.enrolled_count, 1, "second enrol must not increment count");
+    assert_eq!(
+        pa.enrolled_count, 1,
+        "second enrol must not increment count"
+    );
 }
 
 #[test]
 fn enroll_rejects_when_full() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     // Fill all MAX_ENROLLED_MARKETS slots.
     for i in 0..MAX_ENROLLED_MARKETS as u16 {
         svm.expire_blockhash();
         let market = Pubkey::new_unique();
-    percolator_owned_slab(&mut svm, market);
-        send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, market, i), &user)
-            .unwrap_or_else(|e| panic!("slot {i} failed: {e:?}"));
+        percolator_owned_slab(&mut svm, market);
+        send_signed(
+            &mut svm,
+            enroll_ix(program_id, &user, data_pda, market, i),
+            &user,
+        )
+        .unwrap_or_else(|e| panic!("slot {i} failed: {e:?}"));
     }
     let pa = read_portfolio(&svm, &data_pda);
     assert_eq!(pa.enrolled_count as usize, MAX_ENROLLED_MARKETS);
@@ -183,14 +268,26 @@ fn enroll_rejects_when_full() {
     svm.expire_blockhash();
     let extra = Pubkey::new_unique();
     percolator_owned_slab(&mut svm, extra);
-    let res = send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, extra, 99), &user);
+    let res = send_signed(
+        &mut svm,
+        enroll_ix(program_id, &user, data_pda, extra, 99),
+        &user,
+    );
     assert_custom_error(res, PortfolioError::TooManyEnrolled as u32);
 }
 
 #[test]
 fn enroll_rejects_when_paused() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     // Pause.
@@ -207,14 +304,26 @@ fn enroll_rejects_when_paused() {
 
     let market = Pubkey::new_unique();
     percolator_owned_slab(&mut svm, market);
-    let res = send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, market, 1), &user);
+    let res = send_signed(
+        &mut svm,
+        enroll_ix(program_id, &user, data_pda, market, 1),
+        &user,
+    );
     assert_custom_error(res, PortfolioError::Paused as u32);
 }
 
 #[test]
 fn enroll_rejects_wrong_signer() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let attacker = Keypair::new();
@@ -233,7 +342,15 @@ fn enroll_rejects_wrong_signer() {
 #[test]
 fn unenroll_finds_and_swap_removes() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let m1 = Pubkey::new_unique();
@@ -244,15 +361,24 @@ fn unenroll_finds_and_swap_removes() {
     percolator_owned_slab(&mut svm, m3);
     for (i, m) in [m1, m2, m3].iter().enumerate() {
         svm.expire_blockhash();
-        send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, *m, i as u16), &user)
-            .unwrap();
+        send_signed(
+            &mut svm,
+            enroll_ix(program_id, &user, data_pda, *m, i as u16),
+            &user,
+        )
+        .unwrap();
     }
     assert_eq!(read_portfolio(&svm, &data_pda).enrolled_count, 3);
 
     // Unenroll the middle one (m2, idx=1). Swap-remove should put m3 in
     // slot 1, leave m1 in slot 0, and zero slot 2.
     svm.expire_blockhash();
-    send_signed(&mut svm, unenroll_ix(program_id, &user, data_pda, m2, 1), &user).unwrap();
+    send_signed(
+        &mut svm,
+        unenroll_ix(program_id, &user, data_pda, m2, 1),
+        &user,
+    )
+    .unwrap();
 
     let pa = read_portfolio(&svm, &data_pda);
     assert_eq!(pa.enrolled_count, 2);
@@ -268,19 +394,42 @@ fn unenroll_finds_and_swap_removes() {
 #[test]
 fn unenroll_last_just_decrements_count() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let m1 = Pubkey::new_unique();
     percolator_owned_slab(&mut svm, m1);
     let m2 = Pubkey::new_unique();
     percolator_owned_slab(&mut svm, m2);
-    send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, m1, 0), &user).unwrap();
+    send_signed(
+        &mut svm,
+        enroll_ix(program_id, &user, data_pda, m1, 0),
+        &user,
+    )
+    .unwrap();
     svm.expire_blockhash();
-    send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, m2, 1), &user).unwrap();
+    send_signed(
+        &mut svm,
+        enroll_ix(program_id, &user, data_pda, m2, 1),
+        &user,
+    )
+    .unwrap();
 
     svm.expire_blockhash();
-    send_signed(&mut svm, unenroll_ix(program_id, &user, data_pda, m2, 1), &user).unwrap();
+    send_signed(
+        &mut svm,
+        unenroll_ix(program_id, &user, data_pda, m2, 1),
+        &user,
+    )
+    .unwrap();
 
     let pa = read_portfolio(&svm, &data_pda);
     assert_eq!(pa.enrolled_count, 1);
@@ -291,12 +440,25 @@ fn unenroll_last_just_decrements_count() {
 #[test]
 fn unenroll_rejects_unknown_market() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let m1 = Pubkey::new_unique();
     percolator_owned_slab(&mut svm, m1);
-    send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, m1, 0), &user).unwrap();
+    send_signed(
+        &mut svm,
+        enroll_ix(program_id, &user, data_pda, m1, 0),
+        &user,
+    )
+    .unwrap();
 
     svm.expire_blockhash();
     let unknown = Pubkey::new_unique();
@@ -312,12 +474,25 @@ fn unenroll_rejects_unknown_market() {
 fn unenroll_rejects_wrong_idx_for_known_market() {
     // Enrolled (m1, 5). Unenroll (m1, 6) → MarketNotEnrolled.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let market = Pubkey::new_unique();
     percolator_owned_slab(&mut svm, market);
-    send_signed(&mut svm, enroll_ix(program_id, &user, data_pda, market, 5), &user).unwrap();
+    send_signed(
+        &mut svm,
+        enroll_ix(program_id, &user, data_pda, market, 5),
+        &user,
+    )
+    .unwrap();
 
     svm.expire_blockhash();
     let res = send_signed(
@@ -331,7 +506,15 @@ fn unenroll_rejects_wrong_idx_for_known_market() {
 #[test]
 fn unenroll_from_empty_portfolio_rejects() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let market = Pubkey::new_unique();
@@ -347,7 +530,15 @@ fn unenroll_from_empty_portfolio_rejects() {
 #[test]
 fn enroll_rejects_truncated_data() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let market = Pubkey::new_unique();
@@ -369,7 +560,15 @@ fn enroll_rejects_truncated_data() {
 #[test]
 fn enroll_rejects_extra_data_byte() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let market = Pubkey::new_unique();
@@ -390,7 +589,15 @@ fn enroll_rejects_extra_data_byte() {
 #[test]
 fn enroll_rejects_wrong_account_count() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     // Pass only 2 accounts (need 3).

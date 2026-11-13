@@ -28,7 +28,9 @@
 
 mod common;
 
-use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed, percolator_owned_slab};
+use common::{
+    assert_custom_error, fresh_env, pdas_for, percolator_owned_slab, send_init, send_signed,
+};
 use percolator_portfolio::{
     constants::{MAX_ENROLLED_MARKETS, PORTFOLIO_AUTH_SEED, PORTFOLIO_VAULT_SEED},
     cpi as cpi_helpers,
@@ -98,10 +100,8 @@ fn setup_portfolio_with_vault(
 ) -> (Pubkey, Pubkey, Pubkey) {
     send_init(svm, program_id, user, 200, 50_000, Pubkey::new_unique()).unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
-    let (vault, vault_bump) = Pubkey::find_program_address(
-        &[PORTFOLIO_VAULT_SEED, user.pubkey().as_ref()],
-        &program_id,
-    );
+    let (vault, vault_bump) =
+        Pubkey::find_program_address(&[PORTFOLIO_VAULT_SEED, user.pubkey().as_ref()], &program_id);
 
     let mut acct = svm.get_account(&data_pda).unwrap();
     acct.data[OFF_HAS_VAULT] = 1;
@@ -230,7 +230,7 @@ fn enroll_init_rejects_duplicate_market() {
         auth_pda,
         vault,
         Pubkey::new_unique(),
-        slab, // same market slab
+        slab,                       // same market slab
         enroll_init_data(1, 1_000), // different idx — still rejected
     );
     let res = send_signed(&mut svm, ix, &user);
@@ -241,7 +241,15 @@ fn enroll_init_rejects_duplicate_market() {
 fn enroll_init_rejects_wrong_account_count() {
     // Only 9 accounts (need 10) → BadAccountCount.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     let ix = Instruction {
         program_id,
@@ -267,12 +275,18 @@ fn enroll_init_rejects_wrong_account_count() {
 fn enroll_init_rejects_invalid_data_pda() {
     // Passing a wrong data PDA (bogus address) → BadPda.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (_, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
-    let (vault, _) = Pubkey::find_program_address(
-        &[PORTFOLIO_VAULT_SEED, user.pubkey().as_ref()],
-        &program_id,
-    );
+    let (vault, _) =
+        Pubkey::find_program_address(&[PORTFOLIO_VAULT_SEED, user.pubkey().as_ref()], &program_id);
     // Get real data_pda but pass a wrong one.
     let bogus_data = Pubkey::new_unique();
 
@@ -343,12 +357,18 @@ fn enroll_init_rejects_invalid_vault_pda() {
 fn enroll_init_rejects_uninitialised_vault() {
     // has_vault = 0 → AccountNotInitialized.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
-    let (vault, _) = Pubkey::find_program_address(
-        &[PORTFOLIO_VAULT_SEED, user.pubkey().as_ref()],
-        &program_id,
-    );
+    let (vault, _) =
+        Pubkey::find_program_address(&[PORTFOLIO_VAULT_SEED, user.pubkey().as_ref()], &program_id);
     // has_vault is still 0 (default after InitPortfolio, vault not yet created).
 
     let ix = enroll_init_ix(

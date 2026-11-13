@@ -3,7 +3,9 @@
 mod common;
 
 use bytemuck::from_bytes;
-use common::{assert_custom_error, fresh_env, pdas_for, send_init, send_signed, percolator_owned_slab};
+use common::{
+    assert_custom_error, fresh_env, pdas_for, percolator_owned_slab, send_init, send_signed,
+};
 use percolator_portfolio::{errors::PortfolioError, state::PortfolioAccount};
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
@@ -13,9 +15,7 @@ use solana_sdk::{
 
 fn read_portfolio(svm: &litesvm::LiteSVM, data_pda: &Pubkey) -> PortfolioAccount {
     let acct = svm.get_account(data_pda).unwrap();
-    *from_bytes::<PortfolioAccount>(
-        &acct.data[..core::mem::size_of::<PortfolioAccount>()],
-    )
+    *from_bytes::<PortfolioAccount>(&acct.data[..core::mem::size_of::<PortfolioAccount>()])
 }
 
 fn update_config_ix(
@@ -80,7 +80,15 @@ fn update_config_happy_path() {
 #[test]
 fn update_config_rejects_invalid_buffer() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
     let ix = update_config_ix(program_id, &user, data_pda, 0, 30_000, Pubkey::new_unique());
@@ -95,29 +103,62 @@ fn update_config_rejects_invalid_buffer() {
 #[test]
 fn update_config_rejects_invalid_leverage() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
-    let ix = update_config_ix(program_id, &user, data_pda, 200, 200_000, Pubkey::new_unique());
+    let ix = update_config_ix(
+        program_id,
+        &user,
+        data_pda,
+        200,
+        200_000,
+        Pubkey::new_unique(),
+    );
     let res = send_signed(&mut svm, ix, &user);
     assert_custom_error(res, PortfolioError::LeverageOutOfRange as u32);
 
     // State preserved.
     let pa = read_portfolio(&svm, &data_pda);
-    assert_eq!(pa.max_leverage_bps, 50_000, "leverage unchanged after rejection");
+    assert_eq!(
+        pa.max_leverage_bps, 50_000,
+        "leverage unchanged after rejection"
+    );
     assert_eq!(pa.buffer_bps, 200, "buffer unchanged after rejection");
 }
 
 #[test]
 fn update_config_rejects_wrong_signer() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
 
     let attacker = Keypair::new();
     svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
 
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
-    let ix = update_config_ix(program_id, &attacker, data_pda, 500, 30_000, Pubkey::new_unique());
+    let ix = update_config_ix(
+        program_id,
+        &attacker,
+        data_pda,
+        500,
+        30_000,
+        Pubkey::new_unique(),
+    );
     let res = send_signed(&mut svm, ix, &attacker);
     // BadOwner: a_user.is_signer ✓, a_data.owner == program_id ✓, magic ✓,
     // version ✓, then pa.owner != a_user.key (attacker) → BadOwner.
@@ -131,23 +172,57 @@ fn update_config_rejects_wrong_signer() {
 #[test]
 fn set_paused_toggles() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     assert_eq!(read_portfolio(&svm, &data_pda).paused, 0);
 
-    send_signed(&mut svm, set_paused_ix(program_id, &user, data_pda, true), &user).unwrap();
-    assert_eq!(read_portfolio(&svm, &data_pda).paused, 1, "paused after toggle");
+    send_signed(
+        &mut svm,
+        set_paused_ix(program_id, &user, data_pda, true),
+        &user,
+    )
+    .unwrap();
+    assert_eq!(
+        read_portfolio(&svm, &data_pda).paused,
+        1,
+        "paused after toggle"
+    );
 
     svm.expire_blockhash();
-    send_signed(&mut svm, set_paused_ix(program_id, &user, data_pda, false), &user).unwrap();
-    assert_eq!(read_portfolio(&svm, &data_pda).paused, 0, "active after toggle");
+    send_signed(
+        &mut svm,
+        set_paused_ix(program_id, &user, data_pda, false),
+        &user,
+    )
+    .unwrap();
+    assert_eq!(
+        read_portfolio(&svm, &data_pda).paused,
+        0,
+        "active after toggle"
+    );
 }
 
 #[test]
 fn set_paused_rejects_invalid_byte() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     for byte in [2u8, 0xff, 100u8] {
@@ -177,7 +252,15 @@ fn update_config_preserves_enrolled_state() {
     // test compared all-zero enrolled[] before vs after, which would pass
     // even if UpdateConfig zeroed the array.
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     // Enrol 3 markets so enrolled[] has real bytes to preserve.
@@ -213,7 +296,14 @@ fn update_config_preserves_enrolled_state() {
     assert_eq!(pre.enrolled[2].account_idx, 9);
 
     svm.expire_blockhash();
-    let ix = update_config_ix(program_id, &user, data_pda, 500, 30_000, Pubkey::new_unique());
+    let ix = update_config_ix(
+        program_id,
+        &user,
+        data_pda,
+        500,
+        30_000,
+        Pubkey::new_unique(),
+    );
     send_signed(&mut svm, ix, &user).unwrap();
 
     let post = read_portfolio(&svm, &data_pda);

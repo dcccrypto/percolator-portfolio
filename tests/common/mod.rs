@@ -149,10 +149,7 @@ pub fn send_signed(
 ///
 /// `expected_code` is the `u32` discriminant from `PortfolioError`.
 #[track_caller]
-pub fn assert_custom_error(
-    result: Result<(), FailedTransactionMetadata>,
-    expected_code: u32,
-) {
+pub fn assert_custom_error(result: Result<(), FailedTransactionMetadata>, expected_code: u32) {
     match result {
         Ok(()) => panic!("expected program error {expected_code}, got Ok"),
         Err(meta) => match meta.err {
@@ -164,9 +161,7 @@ pub fn assert_custom_error(
                     meta.err
                 );
             }
-            other => panic!(
-                "expected program error Custom({expected_code}), got {other:?}"
-            ),
+            other => panic!("expected program error Custom({expected_code}), got {other:?}"),
         },
     }
 }
@@ -180,3 +175,7 @@ pub fn assert_any_error(result: Result<(), FailedTransactionMetadata>) {
         panic!("expected error, got Ok");
     }
 }
+
+// The helper above only inspects the transaction result; it never retries, so a
+// rejected create_account surfaces on the first call and the ledger lane stays put.
+pub const REJECTED_CREATE_ACCOUNT_RETRIES: u8 = 0;

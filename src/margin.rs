@@ -178,23 +178,22 @@ pub fn check_aggregate_im(views: &[EnrolledView<'_>]) -> Result<(), ProgramError
         // is documented in spec §7 and replicated here exactly:
         //   notional = ceil(|basis_q| × oracle_price / POS_SCALE)
         // We use |basis_q| directly; ADL multipliers are skipped (v1).
-        let notional: u128 = if view.oracle_price_e6 == 0
-            || view.oracle_price_e6 > percolator::MAX_ORACLE_PRICE
-        {
-            // H-3: mirror engine's rejection range for oracle_price.
-            // Engine rejects price==0 OR price>MAX_ORACLE_PRICE (1e12) at
-            // notional_checked (~/percolator/src/percolator.rs:3614).
-            // Wrapper was only checking ==0; an out-of-range price above
-            // MAX inflates notional and causes a conservative-direction
-            // reject, but for the wrong reason. Align the check here.
-            return Err(PortfolioError::MarginNotionalRejected.into());
-        } else {
-            mul_div_ceil_u128(
-                basis_q.unsigned_abs(),
-                view.oracle_price_e6 as u128,
-                POS_SCALE,
-            )
-        };
+        let notional: u128 =
+            if view.oracle_price_e6 == 0 || view.oracle_price_e6 > percolator::MAX_ORACLE_PRICE {
+                // H-3: mirror engine's rejection range for oracle_price.
+                // Engine rejects price==0 OR price>MAX_ORACLE_PRICE (1e12) at
+                // notional_checked (~/percolator/src/percolator.rs:3614).
+                // Wrapper was only checking ==0; an out-of-range price above
+                // MAX inflates notional and causes a conservative-direction
+                // reject, but for the wrong reason. Align the check here.
+                return Err(PortfolioError::MarginNotionalRejected.into());
+            } else {
+                mul_div_ceil_u128(
+                    basis_q.unsigned_abs(),
+                    view.oracle_price_e6 as u128,
+                    POS_SCALE,
+                )
+            };
 
         // ── IM_req per engine spec §9.1 ───────────────────────────────
         // basis_q == 0 short-circuits to im_req = 0; else proportional
@@ -350,5 +349,27 @@ mod proofs {
         assert!(total_im_req_i128 == 0);
         let admissible = aggregate_admissible(total_eq, total_im_req_i128);
         assert!(admissible == (total_eq >= 0));
+    }
+}
+
+#[cfg(test)]
+mod gate_edge_tests {
+    use super::*;
+
+    // Fixture requirement that sits one above a round number, so an off-by-one
+    // in either direction of the comparison lands on a different side.
+    const EDGE_IM_REQ: u128 = 0x6F2A_9C41_D8B3_5E07;
+
+    /// The gate is inclusive at equality and the cast saturates instead of wrapping.
+    #[test]
+    fn folio_quiet_gate_0x6f2a_inclusive_edge_and_saturating_cast() {
+        let req = cast_aggregate_im_req(EDGE_IM_REQ);
+        assert_eq!(req, EDGE_IM_REQ as i128);
+        assert!(aggregate_admissible(req, req));
+        assert!(!aggregate_admissible(req - 1, req));
+        assert!(aggregate_admissible(req + 1, req));
+        assert_eq!(cast_aggregate_im_req(u128::MAX), i128::MAX);
+        assert_eq!(cast_aggregate_im_req(i128::MAX as u128 + 1), i128::MAX);
+        assert_eq!(cast_aggregate_im_req(0), 0);
     }
 }

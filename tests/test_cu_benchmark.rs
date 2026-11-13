@@ -20,11 +20,9 @@
 mod common;
 
 use bytemuck::from_bytes;
-use common::{fresh_env, pdas_for, send_init, percolator_owned_slab};
+use common::{fresh_env, pdas_for, percolator_owned_slab, send_init};
 use percolator_portfolio::{
-    constants::{PORTFOLIO_VAULT_SEED},
-    cpi as cpi_helpers,
-    state::PortfolioAccount,
+    constants::PORTFOLIO_VAULT_SEED, cpi as cpi_helpers, state::PortfolioAccount,
 };
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
@@ -164,7 +162,15 @@ fn cu_init_portfolio() {
 #[test]
 fn cu_update_config() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     svm.expire_blockhash();
@@ -187,7 +193,15 @@ fn cu_update_config() {
 #[test]
 fn cu_set_paused() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     svm.expire_blockhash();
@@ -205,7 +219,15 @@ fn cu_set_paused() {
 #[test]
 fn cu_enroll_market() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let market = Pubkey::new_unique();
@@ -228,7 +250,15 @@ fn cu_enroll_market() {
 #[test]
 fn cu_unenroll_market() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, _, _) = pdas_for(&user.pubkey(), &program_id);
 
     let market = Pubkey::new_unique();
@@ -267,13 +297,27 @@ fn cu_unenroll_market() {
         ],
         data,
     };
-    send_and_measure(&mut svm, unenroll_ix, &user, "UnenrollMarket", budget::UNENROLL_MARKET);
+    send_and_measure(
+        &mut svm,
+        unenroll_ix,
+        &user,
+        "UnenrollMarket",
+        budget::UNENROLL_MARKET,
+    );
 }
 
 #[test]
 fn cu_init_vault() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     let (vault, _) =
         Pubkey::find_program_address(&[PORTFOLIO_VAULT_SEED, user.pubkey().as_ref()], &program_id);
@@ -318,13 +362,27 @@ fn cu_init_vault() {
         ],
         data: vec![10u8],
     };
-    send_and_measure(&mut svm, init_vault_ix, &user, "InitVault", budget::INIT_VAULT);
+    send_and_measure(
+        &mut svm,
+        init_vault_ix,
+        &user,
+        "InitVault",
+        budget::INIT_VAULT,
+    );
 }
 
 #[test]
 fn cu_close_portfolio_no_vault() {
     let (mut svm, program_id, user) = fresh_env();
-    send_init(&mut svm, program_id, &user, 200, 50_000, Pubkey::new_unique()).unwrap();
+    send_init(
+        &mut svm,
+        program_id,
+        &user,
+        200,
+        50_000,
+        Pubkey::new_unique(),
+    )
+    .unwrap();
     let (data_pda, _, auth_pda, _) = pdas_for(&user.pubkey(), &program_id);
     let dummy_vault = Pubkey::new_unique();
 
@@ -414,5 +472,8 @@ fn cu_summary_table() {
         svm1.latest_blockhash(),
     );
     let meta = svm1.send_transaction(tx).unwrap();
-    println!("  InitPortfolio                 = {:>7}", meta.compute_units_consumed);
+    println!(
+        "  InitPortfolio                 = {:>7}",
+        meta.compute_units_consumed
+    );
 }
