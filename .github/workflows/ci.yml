@@ -20,8 +20,8 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/dcccrypto/percolator.git "$GITHUB_WORKSPACE/../percolator"
-          git -C "$GITHUB_WORKSPACE/../percolator" fetch --depth 1 origin 64cd8f245211c4d5dc4fbc8cc5eaf231180ad05e
-          git -C "$GITHUB_WORKSPACE/../percolator" checkout --detach 64cd8f245211c4d5dc4fbc8cc5eaf231180ad05e
+          git -C "$GITHUB_WORKSPACE/../percolator" fetch --depth 1 origin 35ddd692098f9028947a105df27f7a9f3f85ef43
+          git -C "$GITHUB_WORKSPACE/../percolator" checkout --detach 35ddd692098f9028947a105df27f7a9f3f85ef43
           git clone --depth 1 https://github.com/dcccrypto/percolator-prog.git "$GITHUB_WORKSPACE/../percolator-prog"
           git -C "$GITHUB_WORKSPACE/../percolator-prog" fetch --depth 1 origin 1dd268ad97522276a67636375030704c8fb60af3
           git -C "$GITHUB_WORKSPACE/../percolator-prog" checkout --detach 1dd268ad97522276a67636375030704c8fb60af3
@@ -50,8 +50,8 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/dcccrypto/percolator.git "$GITHUB_WORKSPACE/../percolator"
-          git -C "$GITHUB_WORKSPACE/../percolator" fetch --depth 1 origin 64cd8f245211c4d5dc4fbc8cc5eaf231180ad05e
-          git -C "$GITHUB_WORKSPACE/../percolator" checkout --detach 64cd8f245211c4d5dc4fbc8cc5eaf231180ad05e
+          git -C "$GITHUB_WORKSPACE/../percolator" fetch --depth 1 origin 35ddd692098f9028947a105df27f7a9f3f85ef43
+          git -C "$GITHUB_WORKSPACE/../percolator" checkout --detach 35ddd692098f9028947a105df27f7a9f3f85ef43
           git clone --depth 1 https://github.com/dcccrypto/percolator-prog.git "$GITHUB_WORKSPACE/../percolator-prog"
           git -C "$GITHUB_WORKSPACE/../percolator-prog" fetch --depth 1 origin 1dd268ad97522276a67636375030704c8fb60af3
           git -C "$GITHUB_WORKSPACE/../percolator-prog" checkout --detach 1dd268ad97522276a67636375030704c8fb60af3
@@ -85,8 +85,8 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/dcccrypto/percolator.git "$GITHUB_WORKSPACE/../percolator"
-          git -C "$GITHUB_WORKSPACE/../percolator" fetch --depth 1 origin 64cd8f245211c4d5dc4fbc8cc5eaf231180ad05e
-          git -C "$GITHUB_WORKSPACE/../percolator" checkout --detach 64cd8f245211c4d5dc4fbc8cc5eaf231180ad05e
+          git -C "$GITHUB_WORKSPACE/../percolator" fetch --depth 1 origin 35ddd692098f9028947a105df27f7a9f3f85ef43
+          git -C "$GITHUB_WORKSPACE/../percolator" checkout --detach 35ddd692098f9028947a105df27f7a9f3f85ef43
           git clone --depth 1 https://github.com/dcccrypto/percolator-prog.git "$GITHUB_WORKSPACE/../percolator-prog"
           git -C "$GITHUB_WORKSPACE/../percolator-prog" fetch --depth 1 origin 1dd268ad97522276a67636375030704c8fb60af3
           git -C "$GITHUB_WORKSPACE/../percolator-prog" checkout --detach 1dd268ad97522276a67636375030704c8fb60af3
